@@ -34,7 +34,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd())
 from model_v2 import VariationalSeq2Seq_meta
 from data_utils_Final import reconstruct_sequence
 
