@@ -29,6 +29,10 @@ import json
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model_v2 import VariationalSeq2Seq_meta
@@ -197,6 +201,67 @@ def predict_week_ahead(
     return mu_kwh, std_kwh
 
 
+# ── Plot ─────────────────────────────────────────────────────────────────────
+
+def plot_forecast(
+    past_load: np.ndarray,       # [168] historical KWH
+    mu_kwh: np.ndarray,          # [168] predicted mean KWH
+    std_kwh: np.ndarray,         # [168] predicted std KWH
+    past_temp: np.ndarray,       # [168] historical temperature
+    forecast_temp: np.ndarray,   # [168] forecast temperature
+    past_timestamps,             # [168] datetime-like values for past week
+    forecast_timestamps,         # [168] datetime-like values for forecast week
+    out_png: str,
+    xfmr: str = "",
+):
+    past_dt    = pd.to_datetime(past_timestamps)
+    forecast_dt = pd.to_datetime(forecast_timestamps)
+
+    fig, ax = plt.subplots(figsize=(12, 3.6))
+
+    # Load: history and forecast
+    ax.plot(past_dt,    past_load, color="black", linewidth=1.5, label="History")
+    ax.plot(forecast_dt, mu_kwh,  color="blue",  linewidth=1.5, label="Forecast (mean)")
+    ax.fill_between(
+        forecast_dt,
+        mu_kwh - std_kwh,
+        mu_kwh + std_kwh,
+        color="blue", alpha=0.15, label="Forecast (±1σ)"
+    )
+
+    # Vertical line at history/forecast boundary
+    ax.axvline(forecast_dt[0], color="grey", linestyle="--", alpha=0.5)
+
+    ax.set_ylabel("Load (KWH)")
+    ax.set_xlabel("Date")
+    title = f"Week-ahead forecast"
+    if xfmr:
+        title += f"  |  XFMR {xfmr}"
+    ax.set_title(title)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    ax.xaxis.set_major_locator(mdates.DayLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha="center")
+
+    # Temperature on secondary axis
+    ax2 = ax.twinx()
+    ax2.plot(past_dt,    past_temp,    linestyle=":", linewidth=1.0, color="orange", alpha=0.6, label="Temp (hist)")
+    ax2.plot(forecast_dt, forecast_temp, linestyle=":", linewidth=1.0, color="darkorange", alpha=0.6, label="Temp (fore)")
+    ax2.set_ylabel("Temperature (°F)")
+
+    # Keep load on top of temperature
+    ax.set_zorder(ax2.get_zorder() + 1)
+    ax.patch.set_visible(False)
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9, framealpha=0.9)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"  Plot saved to {out_png}")
+
+
 # ── CONFIG — set these paths before running ──────────────────────────────────
 
 CSV_PATH         = "two_week_data.csv"
@@ -250,3 +315,17 @@ if __name__ == "__main__":
     print(f"Forecast saved to {OUTPUT_CSV_PATH}  ({len(out_df)} hourly rows)")
     print(f"  Mean KWH range : {mu_kwh.min():.3f} – {mu_kwh.max():.3f}")
     print(f"  Mean std range : {std_kwh.min():.3f} – {std_kwh.max():.3f}")
+
+    out_png = OUTPUT_CSV_PATH.replace(".csv", ".png")
+    xfmr_id = df["XFMR"].iloc[0] if "XFMR" in df.columns else ""
+    plot_forecast(
+        past_load          = past[COL_LOAD].to_numpy(dtype=float),
+        mu_kwh             = mu_kwh,
+        std_kwh            = std_kwh,
+        past_temp          = past[COL_TEMP].to_numpy(dtype=float),
+        forecast_temp      = fcast[COL_TEMP].to_numpy(dtype=float),
+        past_timestamps    = past[COL_TIME].values,
+        forecast_timestamps= fcast[COL_TIME].values,
+        out_png            = out_png,
+        xfmr               = str(xfmr_id),
+    )
