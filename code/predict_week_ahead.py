@@ -212,7 +212,7 @@ def plot_forecast(
     past_timestamps,             # [168] datetime-like values for past week
     forecast_timestamps,         # [168] datetime-like values for forecast week
     out_png: str,
-    xfmr: str = "",
+    feeder: str = "",
 ):
     past_dt    = pd.to_datetime(past_timestamps)
     forecast_dt = pd.to_datetime(forecast_timestamps)
@@ -235,8 +235,8 @@ def plot_forecast(
     ax.set_ylabel("Load (KWH)")
     ax.set_xlabel("Date")
     title = f"Week-ahead forecast"
-    if xfmr:
-        title += f"  |  XFMR {xfmr}"
+    if feeder:
+        title += f"  |  FEEDER {feeder}"
     ax.set_title(title)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
     ax.xaxis.set_major_locator(mdates.DayLocator())
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     print(f"  Mean std range : {std_kwh.min():.3f} – {std_kwh.max():.3f}")
 
     out_png = OUTPUT_CSV_PATH.replace(".csv", ".png")
-    xfmr_id = df["XFMR"].iloc[0] if "XFMR" in df.columns else ""
+    feeder_id = df["FEEDER"].iloc[0] if "FEEDER" in df.columns else ""
     plot_forecast(
         past_load          = past[COL_LOAD].to_numpy(dtype=float),
         mu_kwh             = mu_kwh,
@@ -327,5 +327,5 @@ if __name__ == "__main__":
         past_timestamps    = past[COL_TIME].values,
         forecast_timestamps= fcast[COL_TIME].values,
         out_png            = out_png,
-        xfmr               = str(xfmr_id),
+        feeder             = str(feeder_id),
     )
