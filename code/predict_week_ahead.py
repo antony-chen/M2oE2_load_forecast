@@ -1,45 +1,30 @@
 """
 Standalone inference script for M2OE2 week-ahead load forecasting.
 
-Usage (as a function):
-    from predict_week_ahead import predict_week_ahead
-    mu_kwh, std_kwh = predict_week_ahead(
-        checkpoint_path  = "Oncor_load_M2OE2_v1_temp_24h_Enc1w_v5_v1temp_oracle_base_best.pt",
-        scaler_meta_path = "vae_base_scaler_meta_v5_v1temp_oracle.json",
-        train_cfg_path   = "train_config_v5_v1temp_oracle.json",
-        past_168h_load      = <np.ndarray shape [168]>,
-        past_168h_temp      = <np.ndarray shape [168]>,
-        past_168h_humidity  = <np.ndarray shape [168]>,
-        past_168h_heatindex = <np.ndarray shape [168]>,
-        forecast_168h_temp      = <np.ndarray shape [168]>,
-        forecast_168h_humidity  = <np.ndarray shape [168]>,
-        forecast_168h_heatindex = <np.ndarray shape [168]>,
-    )
-    # mu_kwh, std_kwh are both shape [168] in original KWH units
+Set the file paths and CSV path in the CONFIG section at the bottom of this
+file, then run it directly: python predict_week_ahead.py
 
-Usage (CLI):
-    python predict_week_ahead.py \\
-        --csv          two_week_data.csv \\
-        --checkpoint   Oncor_load_..._base_best.pt \\
-        --scaler_meta  vae_base_scaler_meta_v5_v1temp_oracle.json \\
-        --train_cfg    train_config_v5_v1temp_oracle.json \\
-        --out          forecast_output.csv
+The CSV must have columns:
+    DATEHRLWT                  - hourly timestamp
+    KWH                        - load (only first 168 rows are used)
+    SURDPOINTTEMPFAHRENHEIT    - dew point temperature
+    RELATIVEHUMIDITY           - relative humidity
+    HEATINDEXFAHRENHEIT        - heat index
 
-    The CSV must have columns:
-        DATEHRLWT                  - hourly timestamp
-        KWH                        - load (only first 168 rows are used)
-        SURDPOINTTEMPFAHRENHEIT    - dew point temperature
-        RELATIVEHUMIDITY           - relative humidity
-        HEATINDEXFAHRENHEIT        - heat index
+Rows 0-167   -> encoder (past week actuals, KWH is read)
+Rows 168-335 -> decoder (forecast week weather only, KWH is ignored)
 
-    Rows 0-167  -> encoder (past week actuals, KWH is used)
-    Rows 168-335 -> decoder (forecast week weather only, KWH is ignored)
+Output CSV columns:
+    DATEHRLWT       - timestamps from the forecast week
+    predicted_kwh   - mean forecast
+    predicted_std   - uncertainty (std dev)
+    lower_90        - lower bound of 90% prediction interval
+    upper_90        - upper bound of 90% prediction interval
 """
 
 import os
 import sys
 import json
-import argparse
 
 import numpy as np
 import pandas as pd
@@ -212,21 +197,18 @@ def predict_week_ahead(
     return mu_kwh, std_kwh
 
 
-# ── CLI entry point ──────────────────────────────────────────────────────────
+# ── CONFIG — set these paths before running ──────────────────────────────────
 
-def _parse_args():
-    p = argparse.ArgumentParser(description="M2OE2 week-ahead load forecast")
-    p.add_argument("--csv",          required=True,  help="Two-week CSV (rows 0-167 = past, 168-335 = forecast week)")
-    p.add_argument("--checkpoint",   required=True,  help="Model checkpoint .pt file")
-    p.add_argument("--scaler_meta",  required=True,  help="vae_base_scaler_meta_*.json")
-    p.add_argument("--train_cfg",    required=True,  help="train_config_*.json")
-    p.add_argument("--out",          default="forecast_output.csv", help="Output CSV path")
-    p.add_argument("--device",       default=None,   help="'cpu' or 'cuda' (auto-detected if omitted)")
-    return p.parse_args()
+CSV_PATH         = "two_week_data.csv"
+CHECKPOINT_PATH  = "Oncor_load_M2OE2_v1_temp_24h_Enc1w_v5_v1temp_oracle_base_best.pt"
+SCALER_META_PATH = "vae_base_scaler_meta_v5_v1temp_oracle.json"
+TRAIN_CFG_PATH   = "train_config_v5_v1temp_oracle.json"
+OUTPUT_CSV_PATH  = "forecast_output.csv"
 
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _run_cli(args):
-    df = pd.read_csv(args.csv)
+if __name__ == "__main__":
+    df = pd.read_csv(CSV_PATH)
     df.columns = [c.strip() for c in df.columns]
 
     if len(df) < 336:
@@ -234,44 +216,37 @@ def _run_cli(args):
             f"CSV must have at least 336 rows (168 past + 168 forecast). Found {len(df)}."
         )
 
-    past    = df.iloc[:168]
-    fcast   = df.iloc[168:336]
-
     for col in [COL_LOAD, COL_TEMP, COL_HUMIDITY, COL_HEATINDEX]:
         if col not in df.columns:
             raise ValueError(f"Missing required column: '{col}'")
 
-    device = torch.device(args.device) if args.device else None
+    past  = df.iloc[:168]
+    fcast = df.iloc[168:336]
 
     mu_kwh, std_kwh = predict_week_ahead(
-        checkpoint_path      = args.checkpoint,
-        scaler_meta_path     = args.scaler_meta,
-        train_cfg_path       = args.train_cfg,
-        past_168h_load       = past[COL_LOAD].to_numpy(dtype=float),
-        past_168h_temp       = past[COL_TEMP].to_numpy(dtype=float),
-        past_168h_humidity   = past[COL_HUMIDITY].to_numpy(dtype=float),
-        past_168h_heatindex  = past[COL_HEATINDEX].to_numpy(dtype=float),
+        checkpoint_path         = CHECKPOINT_PATH,
+        scaler_meta_path        = SCALER_META_PATH,
+        train_cfg_path          = TRAIN_CFG_PATH,
+        past_168h_load          = past[COL_LOAD].to_numpy(dtype=float),
+        past_168h_temp          = past[COL_TEMP].to_numpy(dtype=float),
+        past_168h_humidity      = past[COL_HUMIDITY].to_numpy(dtype=float),
+        past_168h_heatindex     = past[COL_HEATINDEX].to_numpy(dtype=float),
         forecast_168h_temp      = fcast[COL_TEMP].to_numpy(dtype=float),
         forecast_168h_humidity  = fcast[COL_HUMIDITY].to_numpy(dtype=float),
         forecast_168h_heatindex = fcast[COL_HEATINDEX].to_numpy(dtype=float),
-        device               = device,
     )
 
     timestamps = fcast[COL_TIME].values if COL_TIME in fcast.columns else np.arange(168)
 
     out_df = pd.DataFrame({
-        COL_TIME:          timestamps,
-        "predicted_kwh":   mu_kwh,
-        "predicted_std":   std_kwh,
-        "lower_90":        mu_kwh - 1.645 * std_kwh,
-        "upper_90":        mu_kwh + 1.645 * std_kwh,
+        COL_TIME:        timestamps,
+        "predicted_kwh": mu_kwh,
+        "predicted_std": std_kwh,
+        "lower_90":      mu_kwh - 1.645 * std_kwh,
+        "upper_90":      mu_kwh + 1.645 * std_kwh,
     })
 
-    out_df.to_csv(args.out, index=False)
-    print(f"Forecast saved to {args.out}  ({len(out_df)} hourly rows)")
+    out_df.to_csv(OUTPUT_CSV_PATH, index=False)
+    print(f"Forecast saved to {OUTPUT_CSV_PATH}  ({len(out_df)} hourly rows)")
     print(f"  Mean KWH range : {mu_kwh.min():.3f} – {mu_kwh.max():.3f}")
     print(f"  Mean std range : {std_kwh.min():.3f} – {std_kwh.max():.3f}")
-
-
-if __name__ == "__main__":
-    _run_cli(_parse_args())
