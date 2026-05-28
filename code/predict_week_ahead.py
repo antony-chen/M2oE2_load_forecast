@@ -189,8 +189,7 @@ def predict_week_ahead(
     ], axis=-1)  # [168, K_ext]
 
     # ── Build decoder tensors from next week's weather forecast ─────────────
-    # Only the first L hours are needed for the decoder input.
-    # The future load (dec_l) is unknown so we feed zeros.
+    # Only the first L hours of weather are needed as decoder external inputs.
     dec_ext_np = np.stack([
         _normalize(
             _build_feature_array(k, forecast_168h_temp, forecast_168h_humidity, forecast_168h_heatindex, cool_base, heat_base)[:L],
@@ -199,24 +198,45 @@ def predict_week_ahead(
         for k in ext_keys
     ], axis=-1)  # [L, K_ext]
 
-    # Use last week's actual load as decoder input rather than zeros.
-    # The model was trained with teacher forcing (real future load fed at each
-    # decoder step), so feeding zeros causes the GRU hidden state to drift after
-    # ~100 steps, making predictions collapse toward zero. Week-over-week load
-    # is highly correlated, so the prior week is a far better proxy than zeros.
-    dec_l_np = enc_l_np[:L].reshape(L, 1).astype(np.float32)
-
     # ── Convert to batched tensors (batch size = 1) ──────────────────────────
     enc_l   = torch.tensor(enc_l_np,   dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)  # [1,168,1]
-    enc_ext = torch.tensor(enc_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,168,7]
-    dec_l   = torch.tensor(dec_l_np,   dtype=torch.float32).unsqueeze(0).to(device)                # [1,144,1]
-    dec_ext = torch.tensor(dec_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,144,7]
+    enc_ext = torch.tensor(enc_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,168,K]
+    dec_ext = torch.tensor(dec_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,144,K]
 
-    # ── Forward pass ─────────────────────────────────────────────────────────
+    # ── Autoregressive forward pass ───────────────────────────────────────────
+    # The model was trained with teacher forcing (ground-truth future load fed
+    # at each decoder step). At inference that load is unknown, so we feed each
+    # step's own mean prediction back as the load input for the next step.
+    # Each decoder output window i predicts hours [i, i+1, …, i+23], so
+    # prev_mu[:, 0, :] is always the best estimate for the upcoming position.
+    dec = model.decoder
     with torch.no_grad():
-        mu_preds, logvar_preds, _, _ = model(enc_l, enc_ext, dec_l, dec_ext)
-        # mu_preds:     [1, L+1, output_len, 1]  =  [1, 145, 24, 1]
-        # logvar_preds: [1, L+1, output_len, 1]
+        mu_z, logvar_z = model.encoder(enc_l, enc_ext, transform_block=model.transform_enc)
+        z = model.reparameterize(mu_z, logvar_z)
+
+        B = enc_l.size(0)
+        h_rnn = z.unsqueeze(0).repeat(dec.num_layers, 1, 1)  # [layers, B, latent]
+
+        # Step 0: prediction from encoded context alone (before any decoder input)
+        h_last = h_rnn[-1]
+        mu_0     = dec.head_mu(h_last).view(B, dec.output_len, dec.output_dim)
+        logvar_0 = dec.head_logvar(h_last).view(B, dec.output_len, dec.output_dim)
+        mu_steps     = [mu_0.unsqueeze(1)]
+        logvar_steps = [logvar_0.unsqueeze(1)]
+        prev_mu = mu_0  # [B, output_len, 1]
+
+        for t in range(dec_ext.size(1)):  # L = 144 steps
+            x_l_t = prev_mu[:, 0, :]     # [B, 1] — predicted load at position t
+            x_prime, _ = model.transform_dec(h_rnn[-1], x_l_t, dec_ext[:, t])
+            out_t, h_rnn = dec.rnn(x_prime.unsqueeze(1), h_rnn)
+            mu_t     = dec.head_mu(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
+            logvar_t = dec.head_logvar(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
+            mu_steps.append(mu_t.unsqueeze(1))
+            logvar_steps.append(logvar_t.unsqueeze(1))
+            prev_mu = mu_t
+
+        mu_preds     = torch.cat(mu_steps,     dim=1)  # [1, L+1, output_len, 1]
+        logvar_preds = torch.cat(logvar_steps, dim=1)
 
     # ── Reconstruct full 168h from overlapping 24h windows ───────────────────
     mu_norm  = reconstruct_sequence(mu_preds[0, :, :, 0].cpu())            # [168]
