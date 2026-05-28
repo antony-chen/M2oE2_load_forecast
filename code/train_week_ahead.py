@@ -209,6 +209,8 @@ def load_training_data(csv_path: str, feeder_col: str = "FEEDER", feeder_ids: li
     feeders = []
     for fid, gdf in df.groupby(feeder_col):
         gdf = gdf.set_index(COL_TIME).sort_index()
+        # Collapse duplicate timestamps (e.g. DST fall-back creates a repeated hour)
+        gdf = gdf.groupby(level=0).mean(numeric_only=True)
         # Fill gaps with a continuous hourly index so week boundaries are aligned
         full_idx = pd.date_range(start=gdf.index.min(), end=gdf.index.max(), freq="h")
         gdf = gdf.reindex(full_idx)
