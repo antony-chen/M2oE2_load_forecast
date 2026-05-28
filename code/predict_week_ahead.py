@@ -5,7 +5,7 @@ Set the file paths and CSV path in the CONFIG section at the bottom of this
 file, then run it directly: python predict_week_ahead.py
 
 The CSV must have columns:
-    DATEHRLWT                  - hourly timestamp
+    TIME                  - hourly timestamp
     KWH                        - load (only first 168 rows are used)
     SURDPOINTTEMPFAHRENHEIT    - dew point temperature
     RELATIVEHUMIDITY           - relative humidity
@@ -15,7 +15,7 @@ Rows 0-167   -> encoder (past week actuals, KWH is read)
 Rows 168-335 -> decoder (forecast week weather only, KWH is ignored)
 
 Output CSV columns:
-    DATEHRLWT       - timestamps from the forecast week
+    TIME       - timestamps from the forecast week
     predicted_kwh   - mean forecast
     predicted_std   - uncertainty (std dev)
     lower_90        - lower bound of 90% prediction interval
@@ -40,7 +40,7 @@ from data_utils_Final import reconstruct_sequence
 
 
 # ── Column names in the ONCOR CSV ───────────────────────────────────────────
-COL_TIME      = "DATEHRLWT"
+COL_TIME      = "TIME"
 COL_LOAD      = "KWH"
 COL_TEMP      = "SURDPOINTTEMPFAHRENHEIT"   # dew point — maps to model key "temp"
 COL_HUMIDITY  = "RELATIVEHUMIDITY"           # maps to model key "workday"
