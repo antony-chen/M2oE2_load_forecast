@@ -89,10 +89,11 @@ def _load_model(checkpoint_path: str, train_cfg_path: str, device: torch.device)
         dropout     = 0.0,
     ).to(device)
 
-    state = torch.load(checkpoint_path, map_location=device)
-    if "model_state_dict" in state:
-        state = state["model_state_dict"]
-    model.load_state_dict(state, strict=True)
+    obj = torch.load(checkpoint_path, map_location=device)
+    if isinstance(obj, dict) and "model_state_dict" in obj:
+        model.load_state_dict(obj["model_state_dict"], strict=True)
+    else:
+        model.load_state_dict(obj, strict=True)
     model.eval()
     return model, cfg
 
