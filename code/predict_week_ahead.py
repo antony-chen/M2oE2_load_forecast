@@ -143,6 +143,7 @@ def predict_week_ahead(
     forecast_168h_humidity: np.ndarray,   # RELATIVEHUMIDITY forecast
     forecast_168h_heatindex: np.ndarray,  # HEATINDEXFAHRENHEIT forecast
     device: torch.device = None,
+    alpha: float = 0.5,
 ):
     """
     Predict the next 168 hours of KWH load using two decoder strategies and
@@ -156,11 +157,17 @@ def predict_week_ahead(
     past_168h_*       : 168-element arrays of last week's observed values
     forecast_168h_*   : 168-element arrays of next week's weather forecast
     device            : torch device; auto-detected if None
+    alpha             : blend weight for the blended decoder (0.0–1.0).
+                        0.0 = feed prior-week actual load at every step (identical
+                              to the pw method, no error compounding).
+                        1.0 = feed each step's own prediction back (pure
+                              autoregressive, maximum error compounding).
+                        0.5 = equal mix of the two (recommended starting point).
 
     Returns
     -------
-    mu_ar,  std_ar  : np.ndarray [168] — autoregressive forecast (mean, std)
-    mu_pw,  std_pw  : np.ndarray [168] — prior-week-as-input forecast (mean, std)
+    mu_bl,  std_bl  : np.ndarray [168] — blended forecast   (mean, std)
+    mu_pw,  std_pw  : np.ndarray [168] — prior-week forecast (mean, std)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -219,31 +226,32 @@ def predict_week_ahead(
         mu_z, logvar_z = model.encoder(enc_l, enc_ext, transform_block=model.transform_enc)
         z = model.reparameterize(mu_z, logvar_z)
 
-        # ── Method 1: autoregressive ─────────────────────────────────────────
-        # Feed each step's own mean prediction back as the load for the next step.
-        # Each output window i covers hours [i..i+23], so prev_mu[:, 0, :] is
-        # the estimate for the current position.
+        # ── Method 1: blended decoder ────────────────────────────────────────
+        # At each step, the load input is a weighted mix of the prior-week actual
+        # and the model's own previous prediction:
+        #   x_l_t = (1 - alpha) * pw_actual[t]  +  alpha * prev_prediction
+        # alpha=0 → identical to prior-week; alpha=1 → pure autoregressive.
         B = enc_l.size(0)
         h_rnn = z.unsqueeze(0).repeat(dec.num_layers, 1, 1)
         h_last = h_rnn[-1]
         mu_0     = dec.head_mu(h_last).view(B, dec.output_len, dec.output_dim)
         logvar_0 = dec.head_logvar(h_last).view(B, dec.output_len, dec.output_dim)
-        mu_steps_ar     = [mu_0.unsqueeze(1)]
-        logvar_steps_ar = [logvar_0.unsqueeze(1)]
+        mu_steps_bl     = [mu_0.unsqueeze(1)]
+        logvar_steps_bl = [logvar_0.unsqueeze(1)]
         prev_mu = mu_0
 
         for t in range(dec_ext.size(1)):
-            x_l_t = prev_mu[:, 0, :]
+            x_l_t = (1 - alpha) * dec_l_pw[:, t, :] + alpha * prev_mu[:, 0, :]
             x_prime, _ = model.transform_dec(h_rnn[-1], x_l_t, dec_ext[:, t])
             out_t, h_rnn = dec.rnn(x_prime.unsqueeze(1), h_rnn)
             mu_t     = dec.head_mu(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
             logvar_t = dec.head_logvar(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
-            mu_steps_ar.append(mu_t.unsqueeze(1))
-            logvar_steps_ar.append(logvar_t.unsqueeze(1))
+            mu_steps_bl.append(mu_t.unsqueeze(1))
+            logvar_steps_bl.append(logvar_t.unsqueeze(1))
             prev_mu = mu_t
 
-        mu_ar_preds     = torch.cat(mu_steps_ar,     dim=1)  # [1, L+1, output_len, 1]
-        logvar_ar_preds = torch.cat(logvar_steps_ar, dim=1)
+        mu_bl_preds     = torch.cat(mu_steps_bl,     dim=1)  # [1, L+1, output_len, 1]
+        logvar_bl_preds = torch.cat(logvar_steps_bl, dim=1)
 
         # ── Method 2: prior-week load as decoder input ───────────────────────
         mu_pw_preds, logvar_pw_preds = dec(
@@ -252,10 +260,10 @@ def predict_week_ahead(
             transform_block=model.transform_dec,
         )
 
-    mu_ar,  std_ar  = _denorm(mu_ar_preds,  logvar_ar_preds)
-    mu_pw,  std_pw  = _denorm(mu_pw_preds,  logvar_pw_preds)
+    mu_bl, std_bl = _denorm(mu_bl_preds, logvar_bl_preds)
+    mu_pw, std_pw = _denorm(mu_pw_preds, logvar_pw_preds)
 
-    return mu_ar, std_ar, mu_pw, std_pw
+    return mu_bl, std_bl, mu_pw, std_pw
 
 
 # ── Plot ─────────────────────────────────────────────────────────────────────
@@ -281,12 +289,12 @@ def plot_forecast(
 
     # Load: history and both forecasts
     ax.plot(past_dt, past_load, color="black", linewidth=1.5, label="History")
-    ax.plot(forecast_dt, mu_kwh, color="blue", linewidth=1.5, label="Autoregressive")
+    ax.plot(forecast_dt, mu_kwh, color="blue", linewidth=1.5, label="Blended (AR+PW)")
     ax.fill_between(
         forecast_dt,
         mu_kwh - std_kwh,
         mu_kwh + std_kwh,
-        color="blue", alpha=0.15, label="AR ±1σ"
+        color="blue", alpha=0.15, label="Blended ±1σ"
     )
 
     if mu_kwh_pw is not None:
@@ -345,6 +353,11 @@ SCALER_META_PATH = "vae_base_scaler_meta_v5_v1temp_oracle.json"
 TRAIN_CFG_PATH   = "train_config_v5_v1temp_oracle.json"
 OUTPUT_CSV_PATH  = "forecast_output.csv"
 
+# Blend weight for the blended decoder (0.0 = pure prior-week, 1.0 = pure AR).
+# Tune this against actuals: lower values reduce error compounding at the cost
+# of relying more heavily on last week's load pattern.
+ALPHA            = 0.5
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -363,7 +376,7 @@ if __name__ == "__main__":
     past  = df.iloc[:168]
     fcast = df.iloc[168:336]
 
-    mu_ar, std_ar, mu_pw, std_pw = predict_week_ahead(
+    mu_bl, std_bl, mu_pw, std_pw = predict_week_ahead(
         checkpoint_path         = CHECKPOINT_PATH,
         scaler_meta_path        = SCALER_META_PATH,
         train_cfg_path          = TRAIN_CFG_PATH,
@@ -374,6 +387,7 @@ if __name__ == "__main__":
         forecast_168h_temp      = fcast[COL_TEMP].to_numpy(dtype=float),
         forecast_168h_humidity  = fcast[COL_HUMIDITY].to_numpy(dtype=float),
         forecast_168h_heatindex = fcast[COL_HEATINDEX].to_numpy(dtype=float),
+        alpha                   = ALPHA,
     )
 
     timestamps = fcast[COL_TIME].values if COL_TIME in fcast.columns else np.arange(168)
@@ -387,10 +401,10 @@ if __name__ == "__main__":
 
     out_dict = {
         COL_TIME:          timestamps,
-        "ar_predicted_kwh": mu_ar,
-        "ar_predicted_std": std_ar,
-        "ar_lower_90":      mu_ar - 1.645 * std_ar,
-        "ar_upper_90":      mu_ar + 1.645 * std_ar,
+        "bl_predicted_kwh": mu_bl,
+        "bl_predicted_std": std_bl,
+        "bl_lower_90":      mu_bl - 1.645 * std_bl,
+        "bl_upper_90":      mu_bl + 1.645 * std_bl,
         "pw_predicted_kwh": mu_pw,
         "pw_predicted_std": std_pw,
         "pw_lower_90":      mu_pw - 1.645 * std_pw,
@@ -402,17 +416,17 @@ if __name__ == "__main__":
     out_df = pd.DataFrame(out_dict)
     out_df.to_csv(OUTPUT_CSV_PATH, index=False)
     print(f"Forecast saved to {OUTPUT_CSV_PATH}  ({len(out_df)} hourly rows)")
-    print(f"  AR  KWH range : {mu_ar.min():.3f} – {mu_ar.max():.3f}")
-    print(f"  PW  KWH range : {mu_pw.min():.3f} – {mu_pw.max():.3f}")
+    print(f"  Blended (α={ALPHA}) KWH range : {mu_bl.min():.3f} – {mu_bl.max():.3f}")
+    print(f"  Prior-week          KWH range : {mu_pw.min():.3f} – {mu_pw.max():.3f}")
     if actual_kwh is not None:
-        print(f"  Actual KWH range: {actual_kwh.min():.3f} – {actual_kwh.max():.3f}")
+        print(f"  Actual              KWH range : {actual_kwh.min():.3f} – {actual_kwh.max():.3f}")
 
     out_png = OUTPUT_CSV_PATH.replace(".csv", ".png")
     feeder_id = df["FEEDER"].iloc[0] if "FEEDER" in df.columns else ""
     plot_forecast(
         past_load           = past[COL_LOAD].to_numpy(dtype=float),
-        mu_kwh              = mu_ar,
-        std_kwh             = std_ar,
+        mu_kwh              = mu_bl,
+        std_kwh             = std_bl,
         past_temp           = past[COL_TEMP].to_numpy(dtype=float),
         forecast_temp       = fcast[COL_TEMP].to_numpy(dtype=float),
         past_timestamps     = past[COL_TIME].values,
