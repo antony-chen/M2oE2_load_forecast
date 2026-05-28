@@ -145,8 +145,8 @@ def predict_week_ahead(
     device: torch.device = None,
 ):
     """
-    Predict the next 168 hours of KWH load given last week's actuals and next
-    week's weather forecast.
+    Predict the next 168 hours of KWH load using two decoder strategies and
+    return both so they can be compared.
 
     Parameters
     ----------
@@ -159,9 +159,8 @@ def predict_week_ahead(
 
     Returns
     -------
-    mu_kwh  : np.ndarray shape [168] — predicted mean KWH for each hour
-    std_kwh : np.ndarray shape [168] — predicted std KWH for each hour
-                                       use ± 1.645 * std for 90% interval
+    mu_ar,  std_ar  : np.ndarray [168] — autoregressive forecast (mean, std)
+    mu_pw,  std_pw  : np.ndarray [168] — prior-week-as-input forecast (mean, std)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -189,7 +188,6 @@ def predict_week_ahead(
     ], axis=-1)  # [168, K_ext]
 
     # ── Build decoder tensors from next week's weather forecast ─────────────
-    # Only the first L hours of weather are needed as decoder external inputs.
     dec_ext_np = np.stack([
         _normalize(
             _build_feature_array(k, forecast_168h_temp, forecast_168h_humidity, forecast_168h_heatindex, cool_base, heat_base)[:L],
@@ -201,83 +199,106 @@ def predict_week_ahead(
     # ── Convert to batched tensors (batch size = 1) ──────────────────────────
     enc_l   = torch.tensor(enc_l_np,   dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)  # [1,168,1]
     enc_ext = torch.tensor(enc_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,168,K]
-    dec_ext = torch.tensor(dec_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,144,K]
+    dec_ext = torch.tensor(dec_ext_np, dtype=torch.float32).unsqueeze(0).to(device)                # [1,L,K]
 
-    # ── Autoregressive forward pass ───────────────────────────────────────────
-    # The model was trained with teacher forcing (ground-truth future load fed
-    # at each decoder step). At inference that load is unknown, so we feed each
-    # step's own mean prediction back as the load input for the next step.
-    # Each decoder output window i predicts hours [i, i+1, …, i+23], so
-    # prev_mu[:, 0, :] is always the best estimate for the upcoming position.
+    # Prior-week decoder input: use last week's actual (normalized) load.
+    dec_l_pw = torch.tensor(
+        enc_l_np[:L].reshape(L, 1), dtype=torch.float32
+    ).unsqueeze(0).to(device)  # [1,L,1]
+
     dec = model.decoder
+
+    def _denorm(mu_preds, logvar_preds):
+        lo, hi = meta["load_min"], meta["load_max"]
+        mu  = reconstruct_sequence(mu_preds[0, :, :, 0].cpu()).numpy()  * (hi - lo) + lo
+        std = reconstruct_sequence((0.5 * logvar_preds[0, :, :, 0].cpu()).exp()).numpy() * (hi - lo)
+        return mu, std
+
     with torch.no_grad():
+        # ── Shared encoder pass ──────────────────────────────────────────────
         mu_z, logvar_z = model.encoder(enc_l, enc_ext, transform_block=model.transform_enc)
         z = model.reparameterize(mu_z, logvar_z)
 
+        # ── Method 1: autoregressive ─────────────────────────────────────────
+        # Feed each step's own mean prediction back as the load for the next step.
+        # Each output window i covers hours [i..i+23], so prev_mu[:, 0, :] is
+        # the estimate for the current position.
         B = enc_l.size(0)
-        h_rnn = z.unsqueeze(0).repeat(dec.num_layers, 1, 1)  # [layers, B, latent]
-
-        # Step 0: prediction from encoded context alone (before any decoder input)
+        h_rnn = z.unsqueeze(0).repeat(dec.num_layers, 1, 1)
         h_last = h_rnn[-1]
         mu_0     = dec.head_mu(h_last).view(B, dec.output_len, dec.output_dim)
         logvar_0 = dec.head_logvar(h_last).view(B, dec.output_len, dec.output_dim)
-        mu_steps     = [mu_0.unsqueeze(1)]
-        logvar_steps = [logvar_0.unsqueeze(1)]
-        prev_mu = mu_0  # [B, output_len, 1]
+        mu_steps_ar     = [mu_0.unsqueeze(1)]
+        logvar_steps_ar = [logvar_0.unsqueeze(1)]
+        prev_mu = mu_0
 
-        for t in range(dec_ext.size(1)):  # L = 144 steps
-            x_l_t = prev_mu[:, 0, :]     # [B, 1] — predicted load at position t
+        for t in range(dec_ext.size(1)):
+            x_l_t = prev_mu[:, 0, :]
             x_prime, _ = model.transform_dec(h_rnn[-1], x_l_t, dec_ext[:, t])
             out_t, h_rnn = dec.rnn(x_prime.unsqueeze(1), h_rnn)
             mu_t     = dec.head_mu(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
             logvar_t = dec.head_logvar(out_t.squeeze(1)).view(B, dec.output_len, dec.output_dim)
-            mu_steps.append(mu_t.unsqueeze(1))
-            logvar_steps.append(logvar_t.unsqueeze(1))
+            mu_steps_ar.append(mu_t.unsqueeze(1))
+            logvar_steps_ar.append(logvar_t.unsqueeze(1))
             prev_mu = mu_t
 
-        mu_preds     = torch.cat(mu_steps,     dim=1)  # [1, L+1, output_len, 1]
-        logvar_preds = torch.cat(logvar_steps, dim=1)
+        mu_ar_preds     = torch.cat(mu_steps_ar,     dim=1)  # [1, L+1, output_len, 1]
+        logvar_ar_preds = torch.cat(logvar_steps_ar, dim=1)
 
-    # ── Reconstruct full 168h from overlapping 24h windows ───────────────────
-    mu_norm  = reconstruct_sequence(mu_preds[0, :, :, 0].cpu())            # [168]
-    std_norm = reconstruct_sequence((0.5 * logvar_preds[0, :, :, 0].cpu()).exp())  # [168]
+        # ── Method 2: prior-week load as decoder input ───────────────────────
+        mu_pw_preds, logvar_pw_preds = dec(
+            dec_l_pw, dec_ext,
+            z_latent=z,
+            transform_block=model.transform_dec,
+        )
 
-    # ── Denormalize to original KWH units ────────────────────────────────────
-    lo, hi  = meta["load_min"], meta["load_max"]
-    mu_kwh  = mu_norm.numpy()  * (hi - lo) + lo
-    std_kwh = std_norm.numpy() * (hi - lo)
+    mu_ar,  std_ar  = _denorm(mu_ar_preds,  logvar_ar_preds)
+    mu_pw,  std_pw  = _denorm(mu_pw_preds,  logvar_pw_preds)
 
-    return mu_kwh, std_kwh
+    return mu_ar, std_ar, mu_pw, std_pw
 
 
 # ── Plot ─────────────────────────────────────────────────────────────────────
 
 def plot_forecast(
     past_load: np.ndarray,       # [168] historical KWH
-    mu_kwh: np.ndarray,          # [168] predicted mean KWH
-    std_kwh: np.ndarray,         # [168] predicted std KWH
+    mu_kwh: np.ndarray,          # [168] predicted mean KWH  (autoregressive)
+    std_kwh: np.ndarray,         # [168] predicted std KWH   (autoregressive)
     past_temp: np.ndarray,       # [168] historical temperature
     forecast_temp: np.ndarray,   # [168] forecast temperature
     past_timestamps,             # [168] datetime-like values for past week
     forecast_timestamps,         # [168] datetime-like values for forecast week
     out_png: str,
     feeder: str = "",
-    actual_load: np.ndarray = None,  # [168] actual KWH for forecast week, if known
+    actual_load: np.ndarray = None,    # [168] actual KWH for forecast week, if known
+    mu_kwh_pw: np.ndarray = None,      # [168] prior-week forecast mean, if available
+    std_kwh_pw: np.ndarray = None,     # [168] prior-week forecast std,  if available
 ):
-    past_dt    = pd.to_datetime(past_timestamps)
+    past_dt     = pd.to_datetime(past_timestamps)
     forecast_dt = pd.to_datetime(forecast_timestamps)
 
     fig, ax = plt.subplots(figsize=(12, 3.6))
 
-    # Load: history and forecast
-    ax.plot(past_dt,    past_load, color="black", linewidth=1.5, label="History")
-    ax.plot(forecast_dt, mu_kwh,  color="blue",  linewidth=1.5, label="Forecast (mean)")
+    # Load: history and both forecasts
+    ax.plot(past_dt, past_load, color="black", linewidth=1.5, label="History")
+    ax.plot(forecast_dt, mu_kwh, color="blue", linewidth=1.5, label="Autoregressive")
     ax.fill_between(
         forecast_dt,
         mu_kwh - std_kwh,
         mu_kwh + std_kwh,
-        color="blue", alpha=0.15, label="Forecast (±1σ)"
+        color="blue", alpha=0.15, label="AR ±1σ"
     )
+
+    if mu_kwh_pw is not None:
+        ax.plot(forecast_dt, mu_kwh_pw, color="green", linewidth=1.5,
+                linestyle="--", label="Prior-week input")
+        if std_kwh_pw is not None:
+            ax.fill_between(
+                forecast_dt,
+                mu_kwh_pw - std_kwh_pw,
+                mu_kwh_pw + std_kwh_pw,
+                color="green", alpha=0.10, label="PW ±1σ"
+            )
 
     if actual_load is not None:
         ax.plot(forecast_dt, actual_load, color="black", linewidth=1.5,
@@ -342,7 +363,7 @@ if __name__ == "__main__":
     past  = df.iloc[:168]
     fcast = df.iloc[168:336]
 
-    mu_kwh, std_kwh = predict_week_ahead(
+    mu_ar, std_ar, mu_pw, std_pw = predict_week_ahead(
         checkpoint_path         = CHECKPOINT_PATH,
         scaler_meta_path        = SCALER_META_PATH,
         train_cfg_path          = TRAIN_CFG_PATH,
@@ -365,11 +386,15 @@ if __name__ == "__main__":
         actual_kwh = fcast_load_raw
 
     out_dict = {
-        COL_TIME:        timestamps,
-        "predicted_kwh": mu_kwh,
-        "predicted_std": std_kwh,
-        "lower_90":      mu_kwh - 1.645 * std_kwh,
-        "upper_90":      mu_kwh + 1.645 * std_kwh,
+        COL_TIME:          timestamps,
+        "ar_predicted_kwh": mu_ar,
+        "ar_predicted_std": std_ar,
+        "ar_lower_90":      mu_ar - 1.645 * std_ar,
+        "ar_upper_90":      mu_ar + 1.645 * std_ar,
+        "pw_predicted_kwh": mu_pw,
+        "pw_predicted_std": std_pw,
+        "pw_lower_90":      mu_pw - 1.645 * std_pw,
+        "pw_upper_90":      mu_pw + 1.645 * std_pw,
     }
     if actual_kwh is not None:
         out_dict["actual_kwh"] = actual_kwh
@@ -377,8 +402,8 @@ if __name__ == "__main__":
     out_df = pd.DataFrame(out_dict)
     out_df.to_csv(OUTPUT_CSV_PATH, index=False)
     print(f"Forecast saved to {OUTPUT_CSV_PATH}  ({len(out_df)} hourly rows)")
-    print(f"  Mean KWH range : {mu_kwh.min():.3f} – {mu_kwh.max():.3f}")
-    print(f"  Mean std range : {std_kwh.min():.3f} – {std_kwh.max():.3f}")
+    print(f"  AR  KWH range : {mu_ar.min():.3f} – {mu_ar.max():.3f}")
+    print(f"  PW  KWH range : {mu_pw.min():.3f} – {mu_pw.max():.3f}")
     if actual_kwh is not None:
         print(f"  Actual KWH range: {actual_kwh.min():.3f} – {actual_kwh.max():.3f}")
 
@@ -386,8 +411,8 @@ if __name__ == "__main__":
     feeder_id = df["FEEDER"].iloc[0] if "FEEDER" in df.columns else ""
     plot_forecast(
         past_load           = past[COL_LOAD].to_numpy(dtype=float),
-        mu_kwh              = mu_kwh,
-        std_kwh             = std_kwh,
+        mu_kwh              = mu_ar,
+        std_kwh             = std_ar,
         past_temp           = past[COL_TEMP].to_numpy(dtype=float),
         forecast_temp       = fcast[COL_TEMP].to_numpy(dtype=float),
         past_timestamps     = past[COL_TIME].values,
@@ -395,4 +420,6 @@ if __name__ == "__main__":
         out_png             = out_png,
         feeder              = str(feeder_id),
         actual_load         = actual_kwh,
+        mu_kwh_pw           = mu_pw,
+        std_kwh_pw          = std_pw,
     )
