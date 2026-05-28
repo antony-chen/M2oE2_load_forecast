@@ -586,9 +586,10 @@ if __name__ == "__main__":
     print("\nFitting global scalers ...")
     scalers = fit_scalers(feeders)
 
-    scaler_meta = {f"{k}_min": float(sc.data_min_[0]),
-                   f"{k}_max": float(sc.data_max_[0])
-                   for k, sc in scalers.items()}
+    scaler_meta = {}
+    for k, sc in scalers.items():
+        scaler_meta[f"{k}_min"] = float(sc.data_min_[0])
+        scaler_meta[f"{k}_max"] = float(sc.data_max_[0])
     with open(scaler_json, "w") as f:
         json.dump(scaler_meta, f, indent=2)
     print(f"Scaler meta → {scaler_json}")
