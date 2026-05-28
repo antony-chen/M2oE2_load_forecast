@@ -301,7 +301,7 @@ def plot_forecast(
             )
 
     if actual_load is not None:
-        ax.plot(forecast_dt, actual_load, color="black", linewidth=1.5,
+        ax.plot(forecast_dt, actual_load, color="red", linewidth=1.5,
                 linestyle="--", label="Actual")
 
     # Vertical line at history/forecast boundary
