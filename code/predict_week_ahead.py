@@ -90,6 +90,8 @@ def _load_model(checkpoint_path: str, train_cfg_path: str, device: torch.device)
     ).to(device)
 
     state = torch.load(checkpoint_path, map_location=device)
+    if "model_state_dict" in state:
+        state = state["model_state_dict"]
     model.load_state_dict(state, strict=True)
     model.eval()
     return model, cfg
