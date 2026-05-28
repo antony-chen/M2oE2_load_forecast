@@ -199,7 +199,12 @@ def predict_week_ahead(
         for k in ext_keys
     ], axis=-1)  # [L, K_ext]
 
-    dec_l_np = np.zeros((L, 1), dtype=np.float32)
+    # Use last week's actual load as decoder input rather than zeros.
+    # The model was trained with teacher forcing (real future load fed at each
+    # decoder step), so feeding zeros causes the GRU hidden state to drift after
+    # ~100 steps, making predictions collapse toward zero. Week-over-week load
+    # is highly correlated, so the prior week is a far better proxy than zeros.
+    dec_l_np = enc_l_np[:L].reshape(L, 1).astype(np.float32)
 
     # ── Convert to batched tensors (batch size = 1) ──────────────────────────
     enc_l   = torch.tensor(enc_l_np,   dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)  # [1,168,1]
