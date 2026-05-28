@@ -77,16 +77,35 @@ def _load_model(checkpoint_path: str, train_cfg_path: str, device: torch.device)
         cfg = json.load(f)
     dims = cfg["model_dims"]
 
+    # Reconstruct block-expert indices so the model is built in the same
+    # mode it was trained in (3-expert block mode vs n_externals fallback).
+    thermal_indices = None
+    workday_index   = None
+    season_index    = None
+
+    ext_idx_map = cfg.get("ext_idx_map", {})
+    experts     = cfg.get("experts", {})
+    if ext_idx_map and experts:
+        thermal_names   = experts.get("thermal_feature_names", [])
+        workday_name    = experts.get("workday_feature_name")
+        season_name     = experts.get("season_feature_name")
+        thermal_indices = [ext_idx_map[k] for k in thermal_names if k in ext_idx_map] or None
+        workday_index   = ext_idx_map.get(workday_name)
+        season_index    = ext_idx_map.get(season_name)
+
     model = VariationalSeq2Seq_meta(
-        xprime_dim  = dims["xprime_dim"],
-        input_dim   = dims["input_dim"],
-        hidden_size = dims["hidden_dim"],
-        latent_size = dims["latent_dim"],
-        output_len  = dims["output_len"],
-        n_externals = dims["n_externals"],
-        output_dim  = dims["output_dim"],
-        num_layers  = dims["num_layers"],
-        dropout     = 0.0,
+        xprime_dim      = dims["xprime_dim"],
+        input_dim       = dims["input_dim"],
+        hidden_size     = dims["hidden_dim"],
+        latent_size     = dims["latent_dim"],
+        output_len      = dims["output_len"],
+        n_externals     = dims["n_externals"],
+        output_dim      = dims["output_dim"],
+        num_layers      = dims["num_layers"],
+        dropout         = 0.0,
+        thermal_indices = thermal_indices,
+        workday_index   = workday_index,
+        season_index    = season_index,
     ).to(device)
 
     obj = torch.load(checkpoint_path, map_location=device)
