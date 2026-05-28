@@ -242,6 +242,7 @@ def plot_forecast(
     forecast_timestamps,         # [168] datetime-like values for forecast week
     out_png: str,
     feeder: str = "",
+    actual_load: np.ndarray = None,  # [168] actual KWH for forecast week, if known
 ):
     past_dt    = pd.to_datetime(past_timestamps)
     forecast_dt = pd.to_datetime(forecast_timestamps)
@@ -257,6 +258,10 @@ def plot_forecast(
         mu_kwh + std_kwh,
         color="blue", alpha=0.15, label="Forecast (±1σ)"
     )
+
+    if actual_load is not None:
+        ax.plot(forecast_dt, actual_load, color="black", linewidth=1.5,
+                linestyle="--", label="Actual")
 
     # Vertical line at history/forecast boundary
     ax.axvline(forecast_dt[0], color="grey", linestyle="--", alpha=0.5)
@@ -332,29 +337,42 @@ if __name__ == "__main__":
 
     timestamps = fcast[COL_TIME].values if COL_TIME in fcast.columns else np.arange(168)
 
-    out_df = pd.DataFrame({
+    # Detect whether actual load values are present for the forecast week.
+    # Treat all-zero or all-NaN as "not available".
+    fcast_load_raw = fcast[COL_LOAD].to_numpy(dtype=float)
+    actual_kwh = None
+    if not (np.all(np.isnan(fcast_load_raw)) or np.all(fcast_load_raw == 0)):
+        actual_kwh = fcast_load_raw
+
+    out_dict = {
         COL_TIME:        timestamps,
         "predicted_kwh": mu_kwh,
         "predicted_std": std_kwh,
         "lower_90":      mu_kwh - 1.645 * std_kwh,
         "upper_90":      mu_kwh + 1.645 * std_kwh,
-    })
+    }
+    if actual_kwh is not None:
+        out_dict["actual_kwh"] = actual_kwh
 
+    out_df = pd.DataFrame(out_dict)
     out_df.to_csv(OUTPUT_CSV_PATH, index=False)
     print(f"Forecast saved to {OUTPUT_CSV_PATH}  ({len(out_df)} hourly rows)")
     print(f"  Mean KWH range : {mu_kwh.min():.3f} – {mu_kwh.max():.3f}")
     print(f"  Mean std range : {std_kwh.min():.3f} – {std_kwh.max():.3f}")
+    if actual_kwh is not None:
+        print(f"  Actual KWH range: {actual_kwh.min():.3f} – {actual_kwh.max():.3f}")
 
     out_png = OUTPUT_CSV_PATH.replace(".csv", ".png")
     feeder_id = df["FEEDER"].iloc[0] if "FEEDER" in df.columns else ""
     plot_forecast(
-        past_load          = past[COL_LOAD].to_numpy(dtype=float),
-        mu_kwh             = mu_kwh,
-        std_kwh            = std_kwh,
-        past_temp          = past[COL_TEMP].to_numpy(dtype=float),
-        forecast_temp      = fcast[COL_TEMP].to_numpy(dtype=float),
-        past_timestamps    = past[COL_TIME].values,
-        forecast_timestamps= fcast[COL_TIME].values,
-        out_png            = out_png,
-        feeder             = str(feeder_id),
+        past_load           = past[COL_LOAD].to_numpy(dtype=float),
+        mu_kwh              = mu_kwh,
+        std_kwh             = std_kwh,
+        past_temp           = past[COL_TEMP].to_numpy(dtype=float),
+        forecast_temp       = fcast[COL_TEMP].to_numpy(dtype=float),
+        past_timestamps     = past[COL_TIME].values,
+        forecast_timestamps = fcast[COL_TIME].values,
+        out_png             = out_png,
+        feeder              = str(feeder_id),
+        actual_load         = actual_kwh,
     )
