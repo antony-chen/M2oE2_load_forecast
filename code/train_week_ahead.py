@@ -171,9 +171,14 @@ def peak_fidelity_loss(
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_training_data(csv_path: str, feeder_col: str = "FEEDER"):
+def load_training_data(csv_path: str, feeder_col: str = "FEEDER", feeder_ids: list = None):
     """
     Load CSV data and segment each feeder into complete 168-hour weeks.
+
+    Parameters
+    ----------
+    feeder_ids : list of str, optional
+        Specific feeder IDs to include. If None or empty, all feeders are used.
 
     Returns
     -------
@@ -193,6 +198,13 @@ def load_training_data(csv_path: str, feeder_col: str = "FEEDER"):
 
     if feeder_col not in df.columns:
         df[feeder_col] = "ALL"
+
+    if feeder_ids:
+        feeder_ids_str = [str(f) for f in feeder_ids]
+        df = df[df[feeder_col].astype(str).isin(feeder_ids_str)]
+        if df.empty:
+            raise ValueError(f"None of the specified FEEDER_IDS were found in column '{feeder_col}'.")
+        print(f"  Filtering to {len(feeder_ids_str)} specified feeders: {feeder_ids_str}")
 
     feeders = []
     for fid, gdf in df.groupby(feeder_col):
@@ -493,6 +505,10 @@ FEEDER_COL = "FEEDER"                    # column with feeder IDs (set None if a
 OUTPUT_DIR = "."                         # directory for checkpoints and JSON files
 MODEL_TAG  = "prior_week_v1"             # tag appended to all output filenames
 
+# Feeders to include in training. Leave empty to train on all feeders in the CSV.
+# Example: FEEDER_IDS = ["377136683", "377136684", "377136685"]
+FEEDER_IDS = []
+
 # Training  (see recommendations at the top of this file)
 TOTAL_EPOCHS = 600     # recommended range: 600–1000
 BATCH_SIZE   = 16
@@ -543,7 +559,7 @@ if __name__ == "__main__":
 
     # ── 1. Load and segment data ──────────────────────────────────────────────
     print(f"Loading data from {CSV_PATH} ...")
-    feeders = load_training_data(CSV_PATH, feeder_col=FEEDER_COL or "FEEDER")
+    feeders = load_training_data(CSV_PATH, feeder_col=FEEDER_COL or "FEEDER", feeder_ids=FEEDER_IDS or None)
     total_weeks = sum(fd["load"].shape[0] for fd in feeders)
     print(f"Total: {total_weeks} complete weeks across {len(feeders)} feeders")
 
