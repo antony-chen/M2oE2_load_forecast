@@ -49,21 +49,31 @@ COL_HEATINDEX = "HEATINDEXFAHRENHEIT"        # maps to model key "season"
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
-def _compute_forward_24h_temp_stats(temp_1d: np.ndarray, horizon: int = 24):
+def _build_feature_array(key: str, temp, humidity, heatindex, cool_base: float, heat_base: float) -> np.ndarray:
     """
-    For each time t, compute rolling forward-looking statistics over the next
-    `horizon` steps: mean, max, min, and range (ramp).
+    Build a single [T] feature array from raw inputs, matching the feature
+    construction logic in main_M2oE2_Final exactly.
+    """
+    temp      = np.asarray(temp,      dtype=float)
+    humidity  = np.asarray(humidity,  dtype=float)
+    heatindex = np.asarray(heatindex, dtype=float)
+    T = len(temp)
 
-    Uses the same reversed-rolling trick as compute_forward_24h_temp_stats in
-    M2OE2_Base_Only.py so the features match what the model was trained on.
-    """
-    s = pd.Series(np.asarray(temp_1d, dtype=float))
-    s_rev = s.iloc[::-1]
-    mean24 = s_rev.rolling(horizon, min_periods=1).mean().iloc[::-1].to_numpy()
-    max24  = s_rev.rolling(horizon, min_periods=1).max().iloc[::-1].to_numpy()
-    min24  = s_rev.rolling(horizon, min_periods=1).min().iloc[::-1].to_numpy()
-    ramp24 = max24 - min24
-    return mean24, max24, min24, ramp24
+    if key == "temp":
+        return temp
+    elif key == "workday":
+        return humidity
+    elif key == "season":
+        return heatindex
+    elif key == "cdd":
+        return np.maximum(temp - cool_base, 0.0)
+    elif key == "hdd":
+        return np.maximum(heat_base - temp, 0.0)
+    elif key.startswith("temp_fc_tplus"):
+        h = int(key.split("tplus")[1])
+        return temp[np.clip(np.arange(T) + h, 0, T - 1)]
+    else:
+        raise KeyError(f"Unknown feature key: '{key}'")
 
 
 def _normalize(arr: np.ndarray, key: str, meta: dict) -> np.ndarray:
@@ -163,39 +173,31 @@ def predict_week_ahead(
     output_len = cfg["model_dims"]["output_len"]
     L = 168 - output_len  # decoder input length (144 when output_len=24)
 
-    # ── Build encoder tensors from last week's actuals ───────────────────────
-    enc_mean24, enc_max24, enc_min24, enc_ramp24 = _compute_forward_24h_temp_stats(
-        past_168h_temp
-    )
+    ext_keys  = cfg["ext_keys"]
+    cool_base = cfg.get("temp_bases_F", {}).get("cool_base", 72.0)
+    heat_base = cfg.get("temp_bases_F", {}).get("heat_base", 60.0)
 
+    # ── Build encoder tensors from last week's actuals ───────────────────────
     enc_l_np = _normalize(past_168h_load, "load", meta)  # [168]
 
     enc_ext_np = np.stack([
-        _normalize(past_168h_temp,      "temp",           meta),
-        _normalize(past_168h_humidity,  "workday",        meta),  # RELATIVEHUMIDITY
-        _normalize(past_168h_heatindex, "season",         meta),  # HEATINDEXFAHRENHEIT
-        _normalize(enc_mean24,          "temp_fc_mean24", meta),
-        _normalize(enc_max24,           "temp_fc_max24",  meta),
-        _normalize(enc_min24,           "temp_fc_min24",  meta),
-        _normalize(enc_ramp24,          "temp_fc_ramp24", meta),
-    ], axis=-1)  # [168, 7]
+        _normalize(
+            _build_feature_array(k, past_168h_temp, past_168h_humidity, past_168h_heatindex, cool_base, heat_base),
+            k, meta,
+        )
+        for k in ext_keys
+    ], axis=-1)  # [168, K_ext]
 
     # ── Build decoder tensors from next week's weather forecast ─────────────
     # Only the first L hours are needed for the decoder input.
     # The future load (dec_l) is unknown so we feed zeros.
-    fc_mean24, fc_max24, fc_min24, fc_ramp24 = _compute_forward_24h_temp_stats(
-        forecast_168h_temp
-    )
-
     dec_ext_np = np.stack([
-        _normalize(forecast_168h_temp[:L],      "temp",           meta),
-        _normalize(forecast_168h_humidity[:L],  "workday",        meta),
-        _normalize(forecast_168h_heatindex[:L], "season",         meta),
-        _normalize(fc_mean24[:L],               "temp_fc_mean24", meta),
-        _normalize(fc_max24[:L],                "temp_fc_max24",  meta),
-        _normalize(fc_min24[:L],                "temp_fc_min24",  meta),
-        _normalize(fc_ramp24[:L],               "temp_fc_ramp24", meta),
-    ], axis=-1)  # [144, 7]
+        _normalize(
+            _build_feature_array(k, forecast_168h_temp, forecast_168h_humidity, forecast_168h_heatindex, cool_base, heat_base)[:L],
+            k, meta,
+        )
+        for k in ext_keys
+    ], axis=-1)  # [L, K_ext]
 
     dec_l_np = np.zeros((L, 1), dtype=np.float32)
 
