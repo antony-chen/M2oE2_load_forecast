@@ -174,10 +174,15 @@ def peak_fidelity_loss(
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def fill_missing_timestamps(df, time_col=None, freq="h"):
+def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
     """
     Fill gaps in a time series DataFrame by inserting missing timestamp rows
     and propagating adjacent values into them.
+
+    When the DataFrame contains multiple devices (feeders, transformers, etc.),
+    pass `device_col` so that gap-filling is applied independently per device.
+    Each device's range runs from its own min to its own max timestamp, so a
+    device with a short history is never padded to match a longer one.
 
     Parameters
     ----------
@@ -187,6 +192,10 @@ def fill_missing_timestamps(df, time_col=None, freq="h"):
     time_col : str or None
         Name of the timestamp column.  Pass None to use the existing index.
         The column is restored to the output DataFrame after processing.
+    device_col : str or None
+        Column that identifies each device/feeder.  When provided, the
+        function processes each device separately and concatenates the
+        results.  When None, the whole DataFrame is treated as one device.
     freq : str
         Expected time step between consecutive rows (default "h" for hourly).
         Any pandas offset alias works: "15min", "D", etc.
@@ -194,28 +203,37 @@ def fill_missing_timestamps(df, time_col=None, freq="h"):
     Returns
     -------
     pd.DataFrame
-        A copy of `df` with a gapless timestamp sequence covering
-        [min_timestamp, max_timestamp] at `freq` intervals.
-
-        * Newly inserted rows are filled by forward-filling from the
-          preceding row, so the last known value carries forward.
-        * Any leading gaps (no preceding row to copy from) are filled
-          by back-filling from the first valid row.
-        * Duplicate timestamps (e.g. a DST fall-back repeated hour) are
-          collapsed before gap-filling: numeric columns are averaged,
-          non-numeric columns take the first occurrence.
+        A copy of `df` with gapless timestamp sequences.  Row order is
+        device → timestamp.  The original column order is preserved.
 
     Examples
     --------
-    # DataFrame has a TIME column and is missing some hours
+    # Single device, TIME column
     df_clean = fill_missing_timestamps(df, time_col="TIME")
 
-    # DataFrame already has a DatetimeIndex
-    df_clean = fill_missing_timestamps(df)
+    # Multiple devices in one DataFrame
+    df_clean = fill_missing_timestamps(df, time_col="TIME", device_col="FEEDER")
 
-    # 15-minute interval data
-    df_clean = fill_missing_timestamps(df, time_col="TIMESTAMP", freq="15min")
+    # 15-minute data, multiple meters
+    df_clean = fill_missing_timestamps(df, time_col="TS", device_col="METER_ID", freq="15min")
     """
+    if device_col is not None and device_col in df.columns:
+        pieces = []
+        for device_id, group in df.groupby(device_col, sort=False):
+            filled = _fill_one_device(group.copy(), time_col=time_col, freq=freq,
+                                      device_label=str(device_id))
+            pieces.append(filled)
+        out = pd.concat(pieces, ignore_index=True)
+        # Restore original column order
+        return out[df.columns]
+
+    return _fill_one_device(df, time_col=time_col, freq=freq, device_label=None)
+
+
+def _fill_one_device(df, *, time_col, freq, device_label):
+    """Gap-fill a single-device DataFrame slice."""
+    prefix = f"  [{device_label}]" if device_label is not None else " "
+
     df = df.copy()
 
     # ── 1. Put timestamps into the index ─────────────────────────────────────
@@ -238,7 +256,7 @@ def fill_missing_timestamps(df, time_col=None, freq="h"):
             parts.append(df[category_cols].groupby(level=0).first())
 
         df = pd.concat(parts, axis=1)[df.columns] if parts else df.groupby(level=0).first()
-        print(f"  Collapsed {n_dupes} duplicate timestamp(s).")
+        print(f"{prefix} Collapsed {n_dupes} duplicate timestamp(s).")
 
     # ── 3. Reindex to a complete, gapless sequence ────────────────────────────
     full_idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq=freq)
@@ -246,7 +264,7 @@ def fill_missing_timestamps(df, time_col=None, freq="h"):
     df = df.reindex(full_idx)
 
     if n_missing > 0:
-        print(f"  Inserted {n_missing} missing row(s)  "
+        print(f"{prefix} Inserted {n_missing} missing row(s) "
               f"({n_missing / len(full_idx) * 100:.1f}% of {len(full_idx)} total).")
 
     # ── 4. Fill: forward first, then back-fill any leading NaNs ──────────────
