@@ -174,6 +174,92 @@ def peak_fidelity_loss(
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
+def fill_missing_timestamps(df, time_col=None, freq="h"):
+    """
+    Fill gaps in a time series DataFrame by inserting missing timestamp rows
+    and propagating adjacent values into them.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.  Must have either a DatetimeIndex or a column
+        whose name is given by `time_col`.
+    time_col : str or None
+        Name of the timestamp column.  Pass None to use the existing index.
+        The column is restored to the output DataFrame after processing.
+    freq : str
+        Expected time step between consecutive rows (default "h" for hourly).
+        Any pandas offset alias works: "15min", "D", etc.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of `df` with a gapless timestamp sequence covering
+        [min_timestamp, max_timestamp] at `freq` intervals.
+
+        * Newly inserted rows are filled by forward-filling from the
+          preceding row, so the last known value carries forward.
+        * Any leading gaps (no preceding row to copy from) are filled
+          by back-filling from the first valid row.
+        * Duplicate timestamps (e.g. a DST fall-back repeated hour) are
+          collapsed before gap-filling: numeric columns are averaged,
+          non-numeric columns take the first occurrence.
+
+    Examples
+    --------
+    # DataFrame has a TIME column and is missing some hours
+    df_clean = fill_missing_timestamps(df, time_col="TIME")
+
+    # DataFrame already has a DatetimeIndex
+    df_clean = fill_missing_timestamps(df)
+
+    # 15-minute interval data
+    df_clean = fill_missing_timestamps(df, time_col="TIMESTAMP", freq="15min")
+    """
+    df = df.copy()
+
+    # ── 1. Put timestamps into the index ─────────────────────────────────────
+    if time_col is not None:
+        df[time_col] = pd.to_datetime(df[time_col])
+        df = df.set_index(time_col)
+    else:
+        df.index = pd.to_datetime(df.index)
+
+    # ── 2. Collapse duplicate timestamps (e.g. DST fall-back) ────────────────
+    if df.index.duplicated().any():
+        n_dupes = df.index.duplicated().sum()
+        numeric_cols  = df.select_dtypes(include="number").columns.tolist()
+        category_cols = [c for c in df.columns if c not in numeric_cols]
+
+        parts = []
+        if numeric_cols:
+            parts.append(df[numeric_cols].groupby(level=0).mean())
+        if category_cols:
+            parts.append(df[category_cols].groupby(level=0).first())
+
+        df = pd.concat(parts, axis=1)[df.columns] if parts else df.groupby(level=0).first()
+        print(f"  Collapsed {n_dupes} duplicate timestamp(s).")
+
+    # ── 3. Reindex to a complete, gapless sequence ────────────────────────────
+    full_idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq=freq)
+    n_missing = len(full_idx) - len(df)
+    df = df.reindex(full_idx)
+
+    if n_missing > 0:
+        print(f"  Inserted {n_missing} missing row(s)  "
+              f"({n_missing / len(full_idx) * 100:.1f}% of {len(full_idx)} total).")
+
+    # ── 4. Fill: forward first, then back-fill any leading NaNs ──────────────
+    df = df.ffill().bfill()
+
+    # ── 5. Restore time column if it was provided ─────────────────────────────
+    if time_col is not None:
+        df.index.name = time_col
+        df = df.reset_index()
+
+    return df
+
+
 def load_training_data(csv_path: str, feeder_col: str = "FEEDER", feeder_ids: list = None):
     """
     Load CSV data and segment each feeder into complete 168-hour weeks.
