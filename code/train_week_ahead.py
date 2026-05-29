@@ -180,9 +180,12 @@ def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
 
     The DataFrame is split into 168-hour week buckets (anchored to each
     device's first timestamp).  Within each week, any missing rows are
-    inserted and filled by propagating the nearest known value.  Weeks that
-    exist in the data but have fewer than the expected number of rows are
-    filled; weeks that are absent entirely are left out.
+    inserted and their numeric values are filled by linear time-interpolation
+    between the surrounding known timestamps.  Gaps at the start or end of a
+    week (no bounding value on one side) fall back to forward- or back-fill.
+    Categorical columns are always forward-/back-filled.  Weeks that exist
+    in the data but have fewer than the expected number of rows are filled;
+    weeks that are absent entirely are left out.
 
     When the DataFrame contains multiple devices (feeders, transformers, etc.),
     pass `device_col` so that weeks are computed independently per device.
@@ -278,7 +281,22 @@ def _fill_one_device(df, *, time_col, freq, device_label):
         n_inserted = steps_per_week - len(week_df)
         total_inserted += n_inserted
 
-        week_filled = week_df.reindex(full_idx).ffill().bfill()
+        week_filled = week_df.reindex(full_idx)
+
+        # Interpolate interior gaps; ffill/bfill covers leading/trailing edges
+        numeric_cols  = week_filled.select_dtypes(include="number").columns
+        category_cols = [c for c in week_filled.columns if c not in numeric_cols]
+        if len(numeric_cols):
+            week_filled[numeric_cols] = (
+                week_filled[numeric_cols]
+                .interpolate(method="time")
+                .ffill()
+                .bfill()
+            )
+        if category_cols:
+            week_filled[category_cols] = (
+                week_filled[category_cols].ffill().bfill()
+            )
 
         if week_filled.isna().any().any():
             print(f"{prefix} Week {w} ({week_start.date()}): could not fill all gaps "
