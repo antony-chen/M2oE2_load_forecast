@@ -176,13 +176,16 @@ def peak_fidelity_loss(
 
 def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
     """
-    Fill gaps in a time series DataFrame by inserting missing timestamp rows
-    and propagating adjacent values into them.
+    Ensure every 168-hour week in the data has a complete set of timestamps.
+
+    The DataFrame is split into 168-hour week buckets (anchored to each
+    device's first timestamp).  Within each week, any missing rows are
+    inserted and filled by propagating the nearest known value.  Weeks that
+    exist in the data but have fewer than the expected number of rows are
+    filled; weeks that are absent entirely are left out.
 
     When the DataFrame contains multiple devices (feeders, transformers, etc.),
-    pass `device_col` so that gap-filling is applied independently per device.
-    Each device's range runs from its own min to its own max timestamp, so a
-    device with a short history is never padded to match a longer one.
+    pass `device_col` so that weeks are computed independently per device.
 
     Parameters
     ----------
@@ -193,18 +196,18 @@ def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
         Name of the timestamp column.  Pass None to use the existing index.
         The column is restored to the output DataFrame after processing.
     device_col : str or None
-        Column that identifies each device/feeder.  When provided, the
-        function processes each device separately and concatenates the
-        results.  When None, the whole DataFrame is treated as one device.
+        Column that identifies each device/feeder.  When provided, each
+        device is processed separately and results are concatenated.
     freq : str
-        Expected time step between consecutive rows (default "h" for hourly).
-        Any pandas offset alias works: "15min", "D", etc.
+        Time step between consecutive rows (default "h" for hourly).
+        Any fixed-frequency pandas offset alias works: "15min", "30min", etc.
 
     Returns
     -------
     pd.DataFrame
-        A copy of `df` with gapless timestamp sequences.  Row order is
-        device → timestamp.  The original column order is preserved.
+        A copy of `df` where every week that has at least one row now has
+        exactly (168h / freq) rows.  Row order is device → week → timestamp.
+        The original column order is preserved.
 
     Examples
     --------
@@ -224,58 +227,78 @@ def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
                                       device_label=str(device_id))
             pieces.append(filled)
         out = pd.concat(pieces, ignore_index=True)
-        # Restore original column order
         return out[df.columns]
 
     return _fill_one_device(df, time_col=time_col, freq=freq, device_label=None)
 
 
 def _fill_one_device(df, *, time_col, freq, device_label):
-    """Gap-fill a single-device DataFrame slice."""
+    """Gap-fill a single-device DataFrame one 168h week at a time."""
     prefix = f"  [{device_label}]" if device_label is not None else " "
-
     df = df.copy()
 
-    # ── 1. Put timestamps into the index ─────────────────────────────────────
+    # ── 1. Timestamps into index ──────────────────────────────────────────────
     if time_col is not None:
         df[time_col] = pd.to_datetime(df[time_col])
         df = df.set_index(time_col)
     else:
         df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
 
-    # ── 2. Collapse duplicate timestamps (e.g. DST fall-back) ────────────────
+    # ── 2. Collapse DST duplicate timestamps ──────────────────────────────────
     if df.index.duplicated().any():
-        n_dupes = df.index.duplicated().sum()
+        n_dupes = int(df.index.duplicated().sum())
         numeric_cols  = df.select_dtypes(include="number").columns.tolist()
         category_cols = [c for c in df.columns if c not in numeric_cols]
-
         parts = []
         if numeric_cols:
             parts.append(df[numeric_cols].groupby(level=0).mean())
         if category_cols:
             parts.append(df[category_cols].groupby(level=0).first())
-
         df = pd.concat(parts, axis=1)[df.columns] if parts else df.groupby(level=0).first()
         print(f"{prefix} Collapsed {n_dupes} duplicate timestamp(s).")
 
-    # ── 3. Reindex to a complete, gapless sequence ────────────────────────────
-    full_idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq=freq)
-    n_missing = len(full_idx) - len(df)
-    df = df.reindex(full_idx)
+    # ── 3. Steps per 168h week at the requested frequency ─────────────────────
+    step_td = pd.Timedelta(pd.tseries.frequencies.to_offset(freq))
+    steps_per_week = int(pd.Timedelta(hours=168) / step_td)
 
-    if n_missing > 0:
-        print(f"{prefix} Inserted {n_missing} missing row(s) "
-              f"({n_missing / len(full_idx) * 100:.1f}% of {len(full_idx)} total).")
+    # ── 4. Assign rows to 168h week buckets, anchored to the first timestamp ──
+    t0 = df.index.min()
+    week_nums = ((df.index - t0).total_seconds() / 3600 / 168).astype(int).values
 
-    # ── 4. Fill: forward first, then back-fill any leading NaNs ──────────────
-    df = df.ffill().bfill()
+    # ── 5. Fill each week independently ───────────────────────────────────────
+    week_pieces = []
+    total_inserted = 0
 
-    # ── 5. Restore time column if it was provided ─────────────────────────────
+    for w in sorted(np.unique(week_nums)):
+        week_df    = df[week_nums == w]
+        week_start = t0 + pd.Timedelta(hours=168 * int(w))
+        full_idx   = pd.date_range(start=week_start, periods=steps_per_week, freq=freq)
+
+        n_inserted = steps_per_week - len(week_df)
+        total_inserted += n_inserted
+
+        week_filled = week_df.reindex(full_idx).ffill().bfill()
+
+        if week_filled.isna().any().any():
+            print(f"{prefix} Week {w} ({week_start.date()}): could not fill all gaps "
+                  f"— week has too little data to propagate from.")
+
+        week_pieces.append(week_filled)
+
+    if total_inserted > 0:
+        total_rows = len(week_pieces) * steps_per_week
+        print(f"{prefix} Filled {total_inserted} row(s) across {len(week_pieces)} week(s) "
+              f"({total_inserted / total_rows * 100:.1f}% of {total_rows} expected).")
+
+    df_out = pd.concat(week_pieces)
+
+    # ── 6. Restore time column ────────────────────────────────────────────────
     if time_col is not None:
-        df.index.name = time_col
-        df = df.reset_index()
+        df_out.index.name = time_col
+        df_out = df_out.reset_index()
 
-    return df
+    return df_out
 
 
 def load_training_data(csv_path: str, feeder_col: str = "FEEDER", feeder_ids: list = None):
