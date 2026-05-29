@@ -71,6 +71,10 @@ TOP_N_SEARCH = 10
 USE_BOUNDARY = True
 USE_WITHIN = True
 
+# When no shock week is found, fall back to plotting this many samples
+# (picked from the most recent available XLSX samples). Set to 0 to disable.
+FALLBACK_PLOT_N = 1
+
 
 # =========================
 # Helpers (I/O + denorm)
@@ -511,6 +515,43 @@ def pick_first_valid_candidate_week(
     return None
 
 
+def pick_fallback_samples(
+    df_xlsx: pd.DataFrame,
+    week_start_map: pd.DataFrame,
+    model_base: str,
+    encoder_len_weeks: int,
+    n: int = 1,
+):
+    """
+    Return up to *n* (week_idx, week_start_ts, sample_idx) tuples from the
+    most recent valid XLSX samples.  Used when no shock week can be found.
+    """
+    if n <= 0:
+        return []
+
+    available = (
+        df_xlsx[df_xlsx["model_name"] == model_base]["sample_index"]
+        .dropna()
+        .unique()
+    )
+    if len(available) == 0:
+        return []
+
+    results = []
+    for sidx in sorted(available, reverse=True):  # most recent first
+        sidx = int(sidx)
+        widx = sidx + encoder_len_weeks
+        hit = week_start_map[week_start_map["week_idx"] == widx]
+        ts = pd.to_datetime(hit.iloc[0]["week_start_ts"]) if not hit.empty else None
+        pack = extract_one_sample(df_xlsx, sidx, model_base)
+        if pack is not None:
+            results.append((widx, ts, sidx))
+            if len(results) >= n:
+                break
+
+    return results
+
+
 # =========================
 # Main
 # =========================
@@ -558,7 +599,37 @@ def main():
     pick_temp = pick_first_valid_candidate_week(cand_temp, df_xlsx, model_base, ENCODER_LEN_WEEKS)
     if pick_temp is None:
         print("[WARN] No valid TEMP shock week found.")
-        summary["results"]["temp_top1"] = None
+        fb = pick_fallback_samples(df_xlsx, week_start_map, model_base, ENCODER_LEN_WEEKS, FALLBACK_PLOT_N)
+        if fb:
+            wT, tsT, sT = fb[0]
+            print(f"[FALLBACK TEMP] Plotting most-recent available sample: sample_index={sT}, week_idx={wT}")
+            pngT = plot_one_week(
+                df_xlsx=df_xlsx,
+                sample_index=sT,
+                decoder_week_start_ts=tsT,
+                tag=f"TEMP_FALLBACK_w{wT}",
+                out_dir=out_dir,
+                meta=meta,
+                load_unit=LOAD_UNIT,
+                temp_unit=TEMP_UNIT,
+                model_base=model_base,
+                csv_path=CSV_PATH,
+                xfmr=TARGET_XFMR,
+                xlsx_tag=xlsx_tag,
+                save_fig=SAVE_FIG,
+                show_fig=SHOW_FIG,
+                event_timestamps=EVENT_TIMESTAMPS,
+            )
+            summary["results"]["temp_top1"] = {
+                "week_idx": int(wT),
+                "week_start_ts": str(tsT) if tsT else None,
+                "sample_index": int(sT),
+                "shock_metric": None,
+                "png": os.path.basename(pngT) if pngT else None,
+                "fallback": True,
+            }
+        else:
+            summary["results"]["temp_top1"] = None
     else:
         wT, tsT, sT, metricT = pick_temp
         print(f"[TOP1 TEMP] week_idx={wT}, week_start={tsT}, sample_index={sT}, metric={metricT:.3f}")
@@ -596,7 +667,37 @@ def main():
         pick_load = pick_first_valid_candidate_week(cand_load, df_xlsx, model_base, ENCODER_LEN_WEEKS)
         if pick_load is None:
             print("[WARN] No valid LOAD shock week found.")
-            summary["results"]["load_top1"] = None
+            fb = pick_fallback_samples(df_xlsx, week_start_map, model_base, ENCODER_LEN_WEEKS, FALLBACK_PLOT_N)
+            if fb:
+                wL, tsL, sL = fb[0]
+                print(f"[FALLBACK LOAD] Plotting most-recent available sample: sample_index={sL}, week_idx={wL}")
+                pngL = plot_one_week(
+                    df_xlsx=df_xlsx,
+                    sample_index=sL,
+                    decoder_week_start_ts=tsL,
+                    tag=f"LOAD_FALLBACK_w{wL}",
+                    out_dir=out_dir,
+                    meta=meta,
+                    load_unit=LOAD_UNIT,
+                    temp_unit=TEMP_UNIT,
+                    model_base=model_base,
+                    csv_path=CSV_PATH,
+                    xfmr=TARGET_XFMR,
+                    xlsx_tag=xlsx_tag,
+                    save_fig=SAVE_FIG,
+                    show_fig=SHOW_FIG,
+                    event_timestamps=EVENT_TIMESTAMPS,
+                )
+                summary["results"]["load_top1"] = {
+                    "week_idx": int(wL),
+                    "week_start_ts": str(tsL) if tsL else None,
+                    "sample_index": int(sL),
+                    "shock_metric": None,
+                    "png": os.path.basename(pngL) if pngL else None,
+                    "fallback": True,
+                }
+            else:
+                summary["results"]["load_top1"] = None
         else:
             wL, tsL, sL, metricL = pick_load
             print(f"[TOP1 LOAD] week_idx={wL}, week_start={tsL}, sample_index={sL}, metric={metricL:.3f}")
