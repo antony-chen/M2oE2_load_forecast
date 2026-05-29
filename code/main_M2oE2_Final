@@ -822,10 +822,9 @@ def evaluate_model(
         if data_export_list is not None and model_name is not None:
             for i in range(B):
                 hist_i = enc_l[i].detach().cpu().squeeze(-1)
-                # Average overlapping 24-hour windows into a single 168-hour forecast
-                mu_i    = reconstruct_sequence(mu_preds[i].detach().cpu())
-                y_true_i = reconstruct_sequence(tgt[i].detach().cpu())
-                std_i   = reconstruct_sequence(logvar_preds[i].exp().sqrt().detach().cpu())
+                mu_i = mu_first[i].detach().cpu()
+                y_true_i = tgt_first[i].detach().cpu()
+                std_i = sigma_first[i].detach().cpu()
 
                 Lh = len(hist_i)
                 H = len(mu_i)
