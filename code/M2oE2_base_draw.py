@@ -542,7 +542,9 @@ def pick_fallback_samples(
         sidx = int(sidx)
         widx = sidx + encoder_len_weeks
         hit = week_start_map[week_start_map["week_idx"] == widx]
-        ts = pd.to_datetime(hit.iloc[0]["week_start_ts"]) if not hit.empty else None
+        if hit.empty:
+            continue  # no matching CSV week — time axis would be broken
+        ts = pd.to_datetime(hit.iloc[0]["week_start_ts"])
         pack = extract_one_sample(df_xlsx, sidx, model_base)
         if pack is not None:
             results.append((widx, ts, sidx))
