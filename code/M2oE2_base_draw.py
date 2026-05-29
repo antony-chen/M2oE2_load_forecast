@@ -27,6 +27,8 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.transforms as transforms
 from datetime import datetime
 
 # =========================
@@ -54,6 +56,11 @@ SHOW_FIG = True
 
 LOAD_UNIT = "kW"
 TEMP_UNIT = "°F"
+
+# Optional list of event timestamps to mark on the chart (outage, switching order, etc.).
+# Accepts any format pd.to_datetime() understands, e.g. "2023-06-14 14:00".
+# Set to [] or None for no events.
+EVENT_TIMESTAMPS = []
 
 # ---- shock selection params ----
 Q = 0.95
@@ -355,6 +362,7 @@ def plot_one_week(
     xlsx_tag: str,
     save_fig: bool = True,
     show_fig: bool = True,
+    event_timestamps=None,
 ):
     base = extract_one_sample(df_xlsx, sample_index, model_base) if model_base else None
     if base is None:
@@ -387,7 +395,7 @@ def plot_one_week(
 
     temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
 
-    plt.figure(figsize=(12, 3.6))
+    plt.figure(figsize=(14, 5.0))
     ax = plt.gca()
 
     # History & True
@@ -411,12 +419,31 @@ def plot_one_week(
     if total_len > 168:
         ax.axvline(full_time[167], color="grey", linestyle="--", alpha=0.5)
 
+    # Event markers
+    if event_timestamps:
+        trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+        for i, ets in enumerate(event_timestamps):
+            ets_dt = pd.to_datetime(ets)
+            evt_label = f"Event {i + 1}" if len(event_timestamps) > 1 else "Event"
+            ax.axvline(ets_dt, color="darkorange", linewidth=1.8, linestyle="-.", zorder=5, label=evt_label)
+            ax.text(ets_dt, 0.97, evt_label, transform=trans, rotation=90,
+                    fontsize=7, color="darkorange", va="top", ha="right", zorder=6)
+
     ax.set_ylabel(f"Load ({load_unit})")
-    ax.set_xlabel("Date")
     ax.set_title(
         f"{tag} | XFMR={xfmr} | Week={pd.to_datetime(decoder_week_start_ts).date()} | sample={sample_index}\n"
         f"XLSX={xlsx_tag} | model={model_base}"
     )
+
+    # Granular x-axis: day labels as major ticks, 6-hour marks as minor ticks
+    ax.xaxis.set_major_locator(mdates.DayLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %b %-d"))
+    ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18]))
+    ax.tick_params(axis="x", which="major", labelsize=8)
+    ax.tick_params(axis="x", which="minor", length=3)
+    ax.grid(axis="x", which="major", linestyle="--", alpha=0.25, color="grey")
+    ax.grid(axis="x", which="minor", linestyle=":", alpha=0.12, color="grey")
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
     # Temp on secondary axis
     ax2 = ax.twinx()
@@ -432,7 +459,8 @@ def plot_one_week(
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9, framealpha=0.9)
+    ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              ncol=5, fontsize=8, framealpha=0.9)
 
     plt.tight_layout()
 
@@ -546,6 +574,7 @@ def main():
             xlsx_tag=xlsx_tag,
             save_fig=SAVE_FIG,
             show_fig=SHOW_FIG,
+            event_timestamps=EVENT_TIMESTAMPS,
         )
         summary["results"]["temp_top1"] = {
             "week_idx": int(wT),
@@ -583,6 +612,7 @@ def main():
                 xlsx_tag=xlsx_tag,
                 save_fig=SAVE_FIG,
                 show_fig=SHOW_FIG,
+                event_timestamps=EVENT_TIMESTAMPS,
             )
             summary["results"]["load_top1"] = {
                 "week_idx": int(wL),
@@ -633,6 +663,7 @@ def main():
                     xlsx_tag=xlsx_tag,
                     save_fig=SAVE_FIG,
                     show_fig=SHOW_FIG,
+                    event_timestamps=EVENT_TIMESTAMPS,
                 )
                 summary["results"]["load_top1"] = {
                     "week_idx": int(wL),

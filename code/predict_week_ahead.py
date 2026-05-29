@@ -33,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.transforms as transforms
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd())
 from model_v2 import VariationalSeq2Seq_meta
@@ -281,11 +282,12 @@ def plot_forecast(
     actual_load: np.ndarray = None,    # [168] actual KWH for forecast week, if known
     mu_kwh_pw: np.ndarray = None,      # [168] prior-week forecast mean, if available
     std_kwh_pw: np.ndarray = None,     # [168] prior-week forecast std,  if available
+    event_timestamps=None,             # list of timestamps to mark as outage/event lines
 ):
     past_dt     = pd.to_datetime(past_timestamps)
     forecast_dt = pd.to_datetime(forecast_timestamps)
 
-    fig, ax = plt.subplots(figsize=(12, 3.6))
+    fig, ax = plt.subplots(figsize=(14, 5.0))
 
     # Load: history and both forecasts
     ax.plot(past_dt, past_load, color="black", linewidth=1.5, label="History")
@@ -315,15 +317,31 @@ def plot_forecast(
     # Vertical line at history/forecast boundary
     ax.axvline(forecast_dt[0], color="grey", linestyle="--", alpha=0.5)
 
+    # Event markers
+    if event_timestamps:
+        trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+        for i, ets in enumerate(event_timestamps):
+            ets_dt = pd.to_datetime(ets)
+            evt_label = f"Event {i + 1}" if len(event_timestamps) > 1 else "Event"
+            ax.axvline(ets_dt, color="darkorange", linewidth=1.8, linestyle="-.", zorder=5, label=evt_label)
+            ax.text(ets_dt, 0.97, evt_label, transform=trans, rotation=90,
+                    fontsize=7, color="darkorange", va="top", ha="right", zorder=6)
+
     ax.set_ylabel("Load (KWH)")
-    ax.set_xlabel("Date")
-    title = f"Week-ahead forecast"
+    title = "Week-ahead forecast"
     if feeder:
         title += f"  |  FEEDER {feeder}"
     ax.set_title(title)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+
+    # Granular x-axis: day labels as major ticks, 6-hour marks as minor ticks
     ax.xaxis.set_major_locator(mdates.DayLocator())
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha="center")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %b %-d"))
+    ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18]))
+    ax.tick_params(axis="x", which="major", labelsize=8)
+    ax.tick_params(axis="x", which="minor", length=3)
+    ax.grid(axis="x", which="major", linestyle="--", alpha=0.25, color="grey")
+    ax.grid(axis="x", which="minor", linestyle=":", alpha=0.12, color="grey")
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
     # Temperature on secondary axis
     ax2 = ax.twinx()
@@ -337,7 +355,8 @@ def plot_forecast(
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9, framealpha=0.9)
+    ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(0.5, -0.18),
+              ncol=5, fontsize=8, framealpha=0.9)
 
     plt.tight_layout()
     plt.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -357,6 +376,11 @@ OUTPUT_CSV_PATH  = "forecast_output.csv"
 # Tune this against actuals: lower values reduce error compounding at the cost
 # of relying more heavily on last week's load pattern.
 ALPHA            = 0.5
+
+# Optional list of event timestamps to mark on the chart (outage, switching order, etc.).
+# Accepts any format pd.to_datetime() understands, e.g. "2023-06-14 14:00".
+# Set to [] or None for no events.
+EVENT_TIMESTAMPS = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -436,4 +460,5 @@ if __name__ == "__main__":
         actual_load         = actual_kwh,
         mu_kwh_pw           = mu_pw,
         std_kwh_pw          = std_pw,
+        event_timestamps    = EVENT_TIMESTAMPS,
     )
