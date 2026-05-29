@@ -1,14 +1,17 @@
 """
-This file will draw the two time period of the dataset, the "temperature sudden change" (Top1) and the "load sudden change" (Top1).
+M2OE2 sudden-change week plotter.
+
+Designed to run from a Jupyter notebook.  Set the CONFIG variables in the
+section near the top of this file, then call main() in a notebook cell.
+
 Goal
 ----
 1) Find the week with the largest "temperature sudden change" (Top1) for a target XFMR.
 2) Find the week with the largest "load sudden change" (Top1) for a target XFMR.
-3) For each Top1 week, plot (base-only) with your existing style:
+3) For each Top1 week, plot:
    - History (black) + True (red) + Base pred (blue) + Base ±1σ
    - Temperature on secondary axis
-
-This version ONLY changes plotting/output so it will NOT overwrite previous figures.
+   - Optional event markers (outage, switching order, etc.)
 
 Inputs needed:
 - CSV_PATH         : XFMR_forecast_data_20251113.csv
@@ -16,7 +19,7 @@ Inputs needed:
 - SCALER_META_JSON : scaler meta json (load_min/load_max)
 
 Output:
-- a NEW unique output folder under OUT_DIR_BASE
+- a NEW unique output folder under OUT_DIR_BASE (never overwrites previous runs)
 - figure filenames include the XLSX base name to avoid collisions
 - selection_summary.json saved for slides/repro
 """
@@ -44,7 +47,7 @@ XLSX_PATH = "vae_base_only_v5_XFMR125916888.xlsx"
 # e.g. "vae_base_scaler_meta_v5_v1temp_oracle.json"
 SCALER_META_JSON = "vae_base_scaler_meta_v5.json"
 
-TARGET_XFMR = data1
+TARGET_XFMR = 12345678        # ← replace with your XFMR ID (integer)
 ENCODER_LEN_WEEKS = 1
 
 BASE_MODEL_KEYS = ["VAE_BASE_V5", "BASE_V5", "BASE"]
@@ -680,5 +683,4 @@ def main():
     print(f"[✓] Saved summary: {sum_path}")
 
 
-if __name__ == "__main__":
-    main()
+main()

@@ -1,5 +1,8 @@
 """
-Standalone training script for M2OE2 week-ahead load forecasting.
+M2OE2 week-ahead load forecasting — training.
+
+Designed to run from a Jupyter notebook.  Set the CONFIG variables in the
+section near the bottom of this file, then call run() in a notebook cell.
 
 KEY DIFFERENCE from original training
     The decoder is trained with PRIOR-WEEK LOAD as its input instead of
@@ -8,8 +11,8 @@ KEY DIFFERENCE from original training
     conditions the model was actually trained under.
 
 HOW TO USE
-    1. Set paths and options in the CONFIG section at the bottom.
-    2. Run:  python train_week_ahead.py
+    1. Set paths and options in the CONFIG section near the bottom.
+    2. Call run() from a notebook cell (or execute the whole file as a cell).
     3. Copy the three output paths printed at the end into predict_week_ahead.py:
            CHECKPOINT_PATH  = "checkpoint_best_<tag>.pt"
            SCALER_META_PATH = "vae_base_scaler_meta_<tag>.json"
@@ -548,7 +551,7 @@ TOPK_K          = 8
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def run():
     set_seed(SEED)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -599,7 +602,7 @@ if __name__ == "__main__":
     load_scale  = float(scalers["load"].data_max_[0] - scalers["load"].data_min_[0])
     n_externals = len(ext_keys)
 
-    # ── 4. Build dataset ─────────────────────────────────────────────────────
+    # ── 4. Build dataset ──────────────────────────────────────────────────────
     print("\nBuilding seq2seq dataset (prior-week decoder input) ...")
     train_data, val_data = build_seq2seq_dataset(
         feeders, scalers,
@@ -690,3 +693,6 @@ if __name__ == "__main__":
     print(f"  TRAIN_CFG_PATH   = '{cfg_json}'")
     print(f"  ALPHA            = 0.0   # prior-week mode matches training")
     print("=" * 60)
+
+
+run()

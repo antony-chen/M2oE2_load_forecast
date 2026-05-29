@@ -1,25 +1,30 @@
 """
-Standalone inference script for M2OE2 week-ahead load forecasting.
+M2OE2 week-ahead load forecasting — inference and plotting.
 
-Set the file paths and CSV path in the CONFIG section at the bottom of this
-file, then run it directly: python predict_week_ahead.py
+Designed to run from a Jupyter notebook.  Set the CONFIG variables in the
+section near the bottom of this file, then call run() in a notebook cell.
 
 The CSV must have columns:
     TIME                  - hourly timestamp
-    KWH                        - load (only first 168 rows are used)
-    SURDPOINTTEMPFAHRENHEIT    - dew point temperature
-    RELATIVEHUMIDITY           - relative humidity
-    HEATINDEXFAHRENHEIT        - heat index
+    KWH                   - load (only first 168 rows are used as encoder input)
+    SURDPOINTTEMPFAHRENHEIT  - dew point temperature
+    RELATIVEHUMIDITY         - relative humidity
+    HEATINDEXFAHRENHEIT      - heat index
 
 Rows 0-167   -> encoder (past week actuals, KWH is read)
 Rows 168-335 -> decoder (forecast week weather only, KWH is ignored)
 
 Output CSV columns:
-    TIME       - timestamps from the forecast week
-    predicted_kwh   - mean forecast
-    predicted_std   - uncertainty (std dev)
-    lower_90        - lower bound of 90% prediction interval
-    upper_90        - upper bound of 90% prediction interval
+    TIME              - timestamps from the forecast week
+    bl_predicted_kwh  - blended forecast mean
+    bl_predicted_std  - blended forecast std
+    bl_lower_90       - blended 90% lower bound
+    bl_upper_90       - blended 90% upper bound
+    pw_predicted_kwh  - prior-week forecast mean
+    pw_predicted_std  - prior-week forecast std
+    pw_lower_90       - prior-week 90% lower bound
+    pw_upper_90       - prior-week 90% upper bound
+    actual_kwh        - actual load (only present if non-zero values exist)
 """
 
 import os
@@ -29,8 +34,6 @@ import json
 import numpy as np
 import pandas as pd
 import torch
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.transforms as transforms
@@ -271,18 +274,19 @@ def predict_week_ahead(
 
 def plot_forecast(
     past_load: np.ndarray,       # [168] historical KWH
-    mu_kwh: np.ndarray,          # [168] predicted mean KWH  (autoregressive)
-    std_kwh: np.ndarray,         # [168] predicted std KWH   (autoregressive)
+    mu_kwh: np.ndarray,          # [168] predicted mean KWH  (blended)
+    std_kwh: np.ndarray,         # [168] predicted std KWH   (blended)
     past_temp: np.ndarray,       # [168] historical temperature
     forecast_temp: np.ndarray,   # [168] forecast temperature
     past_timestamps,             # [168] datetime-like values for past week
     forecast_timestamps,         # [168] datetime-like values for forecast week
-    out_png: str,
+    out_png: str = None,         # path to save PNG; None = display only
     feeder: str = "",
     actual_load: np.ndarray = None,    # [168] actual KWH for forecast week, if known
     mu_kwh_pw: np.ndarray = None,      # [168] prior-week forecast mean, if available
     std_kwh_pw: np.ndarray = None,     # [168] prior-week forecast std,  if available
     event_timestamps=None,             # list of timestamps to mark as outage/event lines
+    show_fig: bool = True,             # True = display inline (notebook); False = save only
 ):
     past_dt     = pd.to_datetime(past_timestamps)
     forecast_dt = pd.to_datetime(forecast_timestamps)
@@ -359,9 +363,13 @@ def plot_forecast(
               ncol=5, fontsize=8, framealpha=0.9)
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200, bbox_inches="tight")
-    plt.close()
-    print(f"  Plot saved to {out_png}")
+    if out_png:
+        plt.savefig(out_png, dpi=200, bbox_inches="tight")
+        print(f"  Plot saved to {out_png}")
+    if show_fig:
+        plt.show()
+    else:
+        plt.close()
 
 
 # ── CONFIG — set these paths before running ──────────────────────────────────
@@ -384,7 +392,7 @@ EVENT_TIMESTAMPS = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def run():
     df = pd.read_csv(CSV_PATH)
     df.columns = [c.strip() for c in df.columns]
 
@@ -424,7 +432,7 @@ if __name__ == "__main__":
         actual_kwh = fcast_load_raw
 
     out_dict = {
-        COL_TIME:          timestamps,
+        COL_TIME:           timestamps,
         "bl_predicted_kwh": mu_bl,
         "bl_predicted_std": std_bl,
         "bl_lower_90":      mu_bl - 1.645 * std_bl,
@@ -461,4 +469,10 @@ if __name__ == "__main__":
         mu_kwh_pw           = mu_pw,
         std_kwh_pw          = std_pw,
         event_timestamps    = EVENT_TIMESTAMPS,
+        show_fig            = True,
     )
+
+    return out_df
+
+
+run()
