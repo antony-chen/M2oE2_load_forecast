@@ -174,244 +174,121 @@ def peak_fidelity_loss(
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def fill_missing_timestamps(df, time_col=None, device_col=None, freq="h"):
+def fill_missing_timestamps(df, time_col="TIME", device_col="FEEDER", freq="h"):
     """
-    Ensure every 168-hour week in the data has a complete set of timestamps.
+    Ensure every 168-hour week in the data has exactly (168h / freq) rows.
 
-    The DataFrame is split into 168-hour week buckets (anchored to each
-    device's first timestamp).  Within each week, any missing rows are
-    inserted and their numeric values are filled by linear time-interpolation
-    between the surrounding known timestamps.  Gaps at the start or end of a
-    week (no bounding value on one side) fall back to forward- or back-fill.
-    Categorical columns are always forward-/back-filled.  Weeks that exist
-    in the data but have fewer than the expected number of rows are filled;
-    weeks that are absent entirely are left out.
+    For each device, weeks that have at least one existing row are expanded
+    to a full set of timestamps.  Missing values are filled by linear
+    interpolation across the device's entire time series (so interpolation
+    can span week boundaries).  Leading and trailing gaps that have no
+    bounding value on one side are forward- or back-filled.
 
-    When the DataFrame contains multiple devices (feeders, transformers, etc.),
-    pass `device_col` so that weeks are computed independently per device.
+    Weeks with no rows at all are left out — only weeks that already exist
+    in the data are filled.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame.  Must have either a DatetimeIndex or a column
-        whose name is given by `time_col`.
-    time_col : str or None
-        Name of the timestamp column.  Pass None to use the existing index.
-        The column is restored to the output DataFrame after processing.
-    device_col : str or None
-        Column that identifies each device/feeder.  When provided, each
-        device is processed separately and results are concatenated.
+        Must contain `time_col`, `device_col`, and one or more numeric columns.
+    time_col : str
+        Name of the timestamp column (default "TIME").
+    device_col : str
+        Name of the feeder/device column (default "FEEDER").
     freq : str
-        Time step between consecutive rows (default "h" for hourly).
-        Any fixed-frequency pandas offset alias works: "15min", "30min", etc.
+        Expected time step (default "h").  Any fixed pandas offset alias works:
+        "15min", "30min", etc.
 
     Returns
     -------
     pd.DataFrame
-        A copy of `df` where every week that has at least one row now has
-        exactly (168h / freq) rows.  Row order is device → week → timestamp.
-        The original column order is preserved.
-
-    Examples
-    --------
-    # Single device, TIME column
-    df_clean = fill_missing_timestamps(df, time_col="TIME")
-
-    # Multiple devices in one DataFrame
-    df_clean = fill_missing_timestamps(df, time_col="TIME", device_col="FEEDER")
-
-    # 15-minute data, multiple meters
-    df_clean = fill_missing_timestamps(df, time_col="TS", device_col="METER_ID", freq="15min")
+        Same columns as `df`, sorted by device then timestamp.  Every week
+        that had data now has exactly (168h / freq) rows.
     """
-    step_td       = pd.Timedelta(pd.tseries.frequencies.to_offset(freq))
-    steps_per_week = int(pd.Timedelta(hours=168) / step_td)
-    step_s         = int(step_td.total_seconds())
-
-    # ── Parse timestamps and sort once for the whole frame ────────────────────
-    work = df.copy()
-    if time_col is not None:
-        work[time_col] = pd.to_datetime(work[time_col])
-        work = work.set_index(time_col)
-    else:
-        work.index = pd.to_datetime(work.index)
-    work = work.sort_index()
-
-    # ── Collapse DST duplicates once across the whole frame ───────────────────
-    dupe_devices: list = []
-    if work.index.duplicated().any():
-        if device_col is not None and device_col in work.columns:
-            # flag which devices had dupes before collapsing
-            dup_mask = work.index.duplicated(keep=False)
-            dupe_devices = work.loc[dup_mask, device_col].unique().tolist()
-        num_cols = work.select_dtypes(include="number").columns.tolist()
-        cat_cols = [c for c in work.columns if c not in num_cols]
-        grp_key  = [device_col] if (device_col and device_col in work.columns) else []
-        parts = []
-        if num_cols:
-            parts.append(work[num_cols].groupby([work.index] + [work[k] for k in grp_key]).mean())
-        if cat_cols:
-            parts.append(work[cat_cols].groupby([work.index] + [work[k] for k in grp_key]).first())
-        work = pd.concat(parts, axis=1)[work.columns] if parts else work.groupby(level=0).first()
-
-    if device_col is not None and device_col in work.columns:
-        pieces    = []
-        gap_map: dict  = {}      # {timestamp -> [device_ids]}
-        unfill_devices: list = []
-        n_devices = work[device_col].nunique()
-
-        for device_id, grp in work.groupby(device_col, sort=False):
-            filled, inserted = _fill_device(grp, step_s=step_s, steps_per_week=steps_per_week)
-            pieces.append(filled)
-            if inserted:
-                dev_str = str(device_id)
-                for ts in inserted:
-                    gap_map.setdefault(ts, []).append(dev_str)
-            nans = filled.select_dtypes(include="number")
-            if nans.isna().any().any():
-                unfill_devices.append(str(device_id))
-
-        out = pd.concat(pieces)
-
-        # ── Summary ───────────────────────────────────────────────────────────
-        if gap_map:
-            total_ins      = sum(len(v) for v in gap_map.values())
-            affected       = len({d for v in gap_map.values() for d in v})
-            print(f"Filled {total_ins} missing row(s) across "
-                  f"{affected}/{n_devices} feeder(s):")
-
-            pattern_map: dict = {}
-            for ts, devices in sorted(gap_map.items()):
-                pattern_map.setdefault(tuple(sorted(devices)), []).append(ts)
-
-            for devices, timestamps in sorted(pattern_map.items(), key=lambda x: -len(x[0])):
-                n      = len(devices)
-                ts_str = ", ".join(str(t) for t in sorted(timestamps))
-                if n == n_devices:
-                    print(f"  {len(timestamps)} timestamp(s) missing from all "
-                          f"{n} feeder(s):  {ts_str}")
-                elif n <= 5:
-                    print(f"  {len(timestamps)} timestamp(s) missing from "
-                          f"{n} feeder(s) ({', '.join(devices)}):  {ts_str}")
-                else:
-                    print(f"  {len(timestamps)} timestamp(s) missing from "
-                          f"{n}/{n_devices} feeder(s):  {ts_str}")
-
-        if dupe_devices:
-            print(f"  DST duplicates collapsed for: {', '.join(str(d) for d in dupe_devices)}")
-        if unfill_devices:
-            print(f"  Could not fully fill: {', '.join(unfill_devices)}")
-
-        if time_col is not None:
-            out.index.name = time_col
-            out = out.reset_index()
-        return out[df.columns]
-
-    # ── Single-device path ────────────────────────────────────────────────────
-    filled, inserted = _fill_device(work, step_s=step_s, steps_per_week=steps_per_week)
-    if inserted:
-        total_rows = steps_per_week * (len(filled) // steps_per_week)
-        print(f"  Filled {len(inserted)} row(s) "
-              f"({len(inserted) / max(total_rows, 1) * 100:.1f}% of {total_rows} expected).")
-        for ts in sorted(inserted):
-            print(f"    {ts}")
-    if filled.select_dtypes(include="number").isna().any().any():
-        print("  [WARN] Could not fill all gaps — too little data to propagate from.")
-    if dupe_devices:
-        print(f"  DST duplicates collapsed.")
-    if time_col is not None:
-        filled.index.name = time_col
-        filled = filled.reset_index()
-    return filled
-
-
-def _fill_device(grp, *, step_s, steps_per_week):
-    """
-    Fill one device's DataFrame to complete 168h weeks.
-
-    The full expected index for all present weeks is built in one vectorised
-    numpy operation (no Python loop over weeks), then a single reindex +
-    interpolate pass fills the gaps.
-
-    Returns (filled_df, list_of_inserted_timestamps).
-    Devices with no missing rows are returned as-is with an empty list.
-    """
-    t0 = grp.index.min()
-
-    # Compute week bucket for each row as an integer offset from t0.
-    # Use timedelta arithmetic to avoid epoch-second / timezone ambiguity.
-    elapsed_s  = (grp.index - t0).total_seconds().values  # float64, always ≥ 0
-    week_nums  = (elapsed_s / (168 * 3600)).astype(int)
-    unique_weeks  = np.unique(week_nums)
-    expected_rows = len(unique_weeks) * steps_per_week
-
-    # Fast path: nothing to fill
-    if len(grp) == expected_rows:
-        return grp, []
-
-    # Build full expected index in one vectorised step:
-    #   week_offsets_s (n_weeks,) + step_offsets_s (steps_per_week,)
-    #   → broadcasted (n_weeks, steps_per_week) → flattened seconds-from-t0 array
-    week_offsets_s = unique_weeks.astype(np.int64) * 168 * 3600
-    step_offsets_s = np.arange(steps_per_week, dtype=np.int64) * step_s
-    all_offsets_s  = (week_offsets_s[:, None] + step_offsets_s[None, :]).ravel()
-    full_idx = t0 + pd.to_timedelta(all_offsets_s, unit="s")
-
-    inserted = full_idx.difference(grp.index).tolist()
-
-    filled = grp.reindex(full_idx)
-
-    num_cols = filled.select_dtypes(include="number").columns
-    cat_cols = [c for c in filled.columns if c not in num_cols]
-    if len(num_cols):
-        filled[num_cols] = (
-            filled[num_cols].interpolate(method="time").ffill().bfill()
-        )
-    if cat_cols:
-        filled[cat_cols] = filled[cat_cols].ffill().bfill()
-
-    return filled, inserted
-
-
-def _fill_one_device(df, *, time_col, freq, verbose=False):
-    """Thin wrapper kept for backwards compatibility."""
     step_td        = pd.Timedelta(pd.tseries.frequencies.to_offset(freq))
     steps_per_week = int(pd.Timedelta(hours=168) / step_td)
     step_s         = int(step_td.total_seconds())
 
     df = df.copy()
-    if time_col is not None:
-        df[time_col] = pd.to_datetime(df[time_col])
-        df = df.set_index(time_col)
-    else:
-        df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
+    df[time_col] = pd.to_datetime(df[time_col])
 
-    had_dupes = False
-    if df.index.duplicated().any():
-        had_dupes = True
-        n_dupes   = int(df.index.duplicated().sum())
-        num_cols  = df.select_dtypes(include="number").columns.tolist()
-        cat_cols  = [c for c in df.columns if c not in num_cols]
-        parts = []
-        if num_cols:
-            parts.append(df[num_cols].groupby(level=0).mean())
-        if cat_cols:
-            parts.append(df[cat_cols].groupby(level=0).first())
-        df = pd.concat(parts, axis=1)[df.columns] if parts else df.groupby(level=0).first()
-        if verbose:
-            print(f"  Collapsed {n_dupes} duplicate timestamp(s) (DST).")
+    # Numeric columns to interpolate (exclude device and time identifiers)
+    numeric_cols = [
+        c for c in df.select_dtypes(include="number").columns
+        if c not in (time_col, device_col)
+    ]
 
-    filled, inserted = _fill_device(df, step_s=step_s, steps_per_week=steps_per_week)
+    pieces:   list = []
+    gap_map:  dict = {}   # {timestamp -> [feeder_ids that were missing it]}
+    warn_feeders: list = []
 
-    unfillable = []
-    if filled.select_dtypes(include="number").isna().any().any():
-        unfillable.append("(unknown)")
+    for feeder, grp in df.groupby(device_col, sort=False):
+        grp = grp.drop(columns=device_col).set_index(time_col).sort_index()
 
-    if time_col is not None:
-        filled.index.name = time_col
-        filled = filled.reset_index()
+        # Collapse DST duplicate timestamps (fall-back repeated hour)
+        if grp.index.duplicated().any():
+            grp = grp.groupby(level=0).mean(numeric_only=True)
 
-    return filled, inserted, had_dupes, unfillable
+        # ── Build full expected index for all weeks that have data ────────────
+        t0        = grp.index.min()
+        elapsed_s = (grp.index - t0).total_seconds().values
+        unique_weeks   = np.unique((elapsed_s / (168 * 3600)).astype(int))
+        week_offsets_s = unique_weeks.astype(np.int64) * 168 * 3600
+        step_offsets_s = np.arange(steps_per_week, dtype=np.int64) * step_s
+        all_offsets_s  = (week_offsets_s[:, None] + step_offsets_s[None, :]).ravel()
+        full_idx       = t0 + pd.to_timedelta(all_offsets_s, unit="s")
+
+        # Record which timestamps are new
+        inserted = full_idx.difference(grp.index).tolist()
+        for ts in inserted:
+            gap_map.setdefault(ts, []).append(str(feeder))
+
+        # ── Reindex then interpolate across the whole time series ─────────────
+        grp = grp.reindex(full_idx)
+        grp[numeric_cols] = (
+            grp[numeric_cols]
+            .interpolate(method="time")   # linear between known timestamps
+            .ffill()                       # fill leading edge
+            .bfill()                       # fill trailing edge
+        )
+
+        if grp[numeric_cols].isna().any().any():
+            warn_feeders.append(str(feeder))
+
+        grp[device_col] = feeder
+        grp.index.name  = time_col
+        pieces.append(grp.reset_index())
+
+    out = pd.concat(pieces, ignore_index=True)
+
+    # ── Summary output ────────────────────────────────────────────────────────
+    n_devices = df[device_col].nunique()
+    if gap_map:
+        total_ins = sum(len(v) for v in gap_map.values())
+        affected  = len({d for v in gap_map.values() for d in v})
+        print(f"Filled {total_ins} missing row(s) across {affected}/{n_devices} feeder(s):")
+
+        pattern_map: dict = {}
+        for ts, feeders in sorted(gap_map.items()):
+            pattern_map.setdefault(tuple(sorted(feeders)), []).append(ts)
+
+        for feeders, timestamps in sorted(pattern_map.items(), key=lambda x: -len(x[0])):
+            n      = len(feeders)
+            ts_str = ", ".join(str(t) for t in sorted(timestamps))
+            if n == n_devices:
+                print(f"  {len(timestamps)} timestamp(s) missing from all {n} feeder(s):  {ts_str}")
+            elif n <= 5:
+                print(f"  {len(timestamps)} timestamp(s) missing from "
+                      f"{n} feeder(s) ({', '.join(feeders)}):  {ts_str}")
+            else:
+                print(f"  {len(timestamps)} timestamp(s) missing from "
+                      f"{n}/{n_devices} feeder(s):  {ts_str}")
+
+    if warn_feeders:
+        print(f"  [WARN] Could not fill all gaps (feeder has only 1 row in a week): "
+              f"{', '.join(warn_feeders)}")
+
+    return out[df.columns]
 
 
 def load_training_data(csv_path: str, feeder_col: str = "FEEDER", feeder_ids: list = None):
