@@ -1215,7 +1215,13 @@ def get_data_solar_weather_weekly():
             np.array(season_feat))
 
 
-def _oncor_load_weekly_utils():
+def _oncor_load_weekly_utils(
+    csv_path="TransformerLoadData.csv",
+    out_dir="processed_data",
+    time_col="DATEHRLWT",
+    group_col="XFMR",
+    load_col="KWH",
+):
     '''
     Run once. Creates one NPZ per XFMR with:
       - tensor:        (weeks, 168, F) float
@@ -1225,16 +1231,29 @@ def _oncor_load_weekly_utils():
       - week_start:    (weeks,) datetime64[h]
       - week_end:      (weeks,) datetime64[h]
       - xfmr:          () str
-    '''
-    csv_path = "TransformerLoadData.csv"
-    out_dir  = "processed_data"
-    # os.makedirs(out_dir, exist_ok=True)
 
+    Parameters
+    ----------
+    csv_path : str
+        Path to the input CSV file.
+    out_dir : str
+        Directory where .npz files are written (must already exist).
+    time_col : str
+        Name of the timestamp column.
+    group_col : str
+        Name of the transformer/device ID column.
+    load_col : str
+        Name of the load column.  This column is placed first in the feature
+        list so downstream code that expects load at index 0 keeps working.
+    '''
     df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
 
-    time_col  = "DATEHRLWT"
-    group_col = "XFMR"
+    if load_col not in df.columns:
+        raise ValueError(
+            f"load_col='{load_col}' not found in CSV. "
+            f"Available columns: {df.columns.tolist()}"
+        )
 
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.dropna(subset=[time_col]).sort_values(time_col)
@@ -1242,8 +1261,7 @@ def _oncor_load_weekly_utils():
     if group_col not in df.columns:
         df[group_col] = "ALL"
 
-    expected_features = [
-        "KWH",
+    weather_features = [
         "SURFACETEMPERATUREFAHRENHEIT",
         "SURDPOINTTEMPFAHRENHEIT",
         "PREPREVHOURINCHES",
@@ -1254,19 +1272,19 @@ def _oncor_load_weekly_utils():
         "HEATINDEXFAHRENHEIT",
         "SNOWFALLINCHES",
     ]
-    present_features = [f for f in expected_features if f in df.columns]
-    if not present_features:
+    # Load column always first; then any weather columns present in the CSV
+    present_features = [load_col] + [f for f in weather_features if f in df.columns and f != load_col]
+    if len(present_features) == 1:
+        # No recognised weather columns — fall back to all numeric columns
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        present_features = [c for c in numeric_cols if c != group_col]
+        present_features = [load_col] + [c for c in numeric_cols if c not in (load_col, group_col)]
+
+    print(f"Features ({len(present_features)}): {present_features}")
 
     def build_weekly_tensor(gdf, features, week_hours=168):
-        # Keep only relevant columns
         gdf = gdf[[time_col] + features].copy().sort_values(time_col).set_index(time_col)
-
-        # Aggregate duplicate timestamps by mean (if any)
         gdf = gdf.groupby(level=0).mean(numeric_only=True)
 
-        # Reindex to continuous hourly timeline
         start = gdf.index.min().floor("h")
         end   = gdf.index.max().ceil("h")
         full_index = pd.date_range(start=start, end=end, freq="h")
@@ -1276,32 +1294,28 @@ def _oncor_load_weekly_utils():
         total_hours = len(X)
         num_weeks   = total_hours // week_hours
 
-        week_arrays   = []
-        week_times    = []
-        week_spans_s  = []
-        week_spans_e  = []
+        week_arrays, week_times, week_spans_s, week_spans_e = [], [], [], []
 
         for w in range(num_weeks):
-            sl = X.iloc[w*week_hours:(w+1)*week_hours]
-            # Only keep fully observed weeks
+            sl = X.iloc[w * week_hours:(w + 1) * week_hours]
             if not sl.isna().any().any():
                 week_arrays.append(sl.to_numpy(dtype=float))
-                idx = sl.index.values.astype("datetime64[h]")  # (168,)
+                idx = sl.index.values.astype("datetime64[h]")
                 week_times.append(idx)
                 week_spans_s.append(idx[0])
                 week_spans_e.append(idx[-1])
 
         if week_arrays:
-            arr          = np.stack(week_arrays, axis=0)               # (W,168,F)
-            time_index   = np.stack(week_times, axis=0)               # (W,168) datetime64[h]
-            week_start   = np.array(week_spans_s, dtype="datetime64[h]")
-            week_end     = np.array(week_spans_e, dtype="datetime64[h]")
+            arr        = np.stack(week_arrays, axis=0)
+            time_index = np.stack(week_times, axis=0)
+            week_start = np.array(week_spans_s, dtype="datetime64[h]")
+            week_end   = np.array(week_spans_e, dtype="datetime64[h]")
         else:
             F = len(features)
             arr        = np.empty((0, week_hours, F), dtype=float)
-            time_index = np.empty((0, week_hours), dtype="datetime64[h]")
-            week_start = np.empty((0,), dtype="datetime64[h]")
-            week_end   = np.empty((0,), dtype="datetime64[h]")
+            time_index = np.empty((0, week_hours),    dtype="datetime64[h]")
+            week_start = np.empty((0,),               dtype="datetime64[h]")
+            week_end   = np.empty((0,),               dtype="datetime64[h]")
 
         return arr, time_index, week_start, week_end, num_weeks, total_hours
 
@@ -1314,7 +1328,6 @@ def _oncor_load_weekly_utils():
         safe_xfmr = str(xfmr).replace("/", "_").replace("\\", "_").replace(" ", "_")
         out_file  = os.path.join(out_dir, f"weeks_tensor_{safe_xfmr}.npz")
 
-        # Also keep ISO strings for portability
         time_index_str = np.array([[str(t) for t in row] for row in time_index], dtype=object)
 
         np.savez_compressed(
@@ -1327,11 +1340,11 @@ def _oncor_load_weekly_utils():
             week_end=week_end,
             xfmr=np.array(safe_xfmr, dtype=object),
         )
+        print(f"  {out_file}  ({tensor.shape[0]} weeks / {possible_weeks} possible, {total_hours} hours)")
         out_paths.append(out_file)
 
-    print("Saved files:")
-    for p in out_paths:
-        print(p)
+    print(f"Done. {len(out_paths)} file(s) saved to '{out_dir}'.")
+    return out_paths
 
 def combine_oncor_transformers(transformer_ids, out_path="processed_data/weeks_tensor_all.npz"):
     """Combine weekly data from multiple transformers into one .npz file."""
