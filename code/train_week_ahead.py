@@ -335,11 +335,12 @@ def _fill_device(grp, *, step_s, steps_per_week):
     Returns (filled_df, list_of_inserted_timestamps).
     Devices with no missing rows are returned as-is with an empty list.
     """
-    t0       = grp.index.min()
-    t0_s     = t0.timestamp()
-    ts_s     = grp.index.astype(np.int64) // 10 ** 9   # epoch seconds
+    t0 = grp.index.min()
 
-    week_nums     = ((ts_s - t0_s) / (168 * 3600)).astype(int)
+    # Compute week bucket for each row as an integer offset from t0.
+    # Use timedelta arithmetic to avoid epoch-second / timezone ambiguity.
+    elapsed_s  = (grp.index - t0).total_seconds().values  # float64, always ≥ 0
+    week_nums  = (elapsed_s / (168 * 3600)).astype(int)
     unique_weeks  = np.unique(week_nums)
     expected_rows = len(unique_weeks) * steps_per_week
 
@@ -348,12 +349,12 @@ def _fill_device(grp, *, step_s, steps_per_week):
         return grp, []
 
     # Build full expected index in one vectorised step:
-    #   week_offsets (n_weeks,) + step_offsets (steps_per_week,)
-    #   → broadcasted (n_weeks, steps_per_week) → flattened epoch-second array
-    week_offset_s = unique_weeks.astype(np.int64) * 168 * 3600
-    step_offset_s = np.arange(steps_per_week, dtype=np.int64) * step_s
-    all_epoch_s   = (week_offset_s[:, None] + step_offset_s[None, :]).ravel()
-    full_idx      = pd.to_datetime(t0_s + all_epoch_s, unit="s", utc=False).tz_localize(None)
+    #   week_offsets_s (n_weeks,) + step_offsets_s (steps_per_week,)
+    #   → broadcasted (n_weeks, steps_per_week) → flattened seconds-from-t0 array
+    week_offsets_s = unique_weeks.astype(np.int64) * 168 * 3600
+    step_offsets_s = np.arange(steps_per_week, dtype=np.int64) * step_s
+    all_offsets_s  = (week_offsets_s[:, None] + step_offsets_s[None, :]).ravel()
+    full_idx = t0 + pd.to_timedelta(all_offsets_s, unit="s")
 
     inserted = full_idx.difference(grp.index).tolist()
 
