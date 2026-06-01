@@ -380,6 +380,12 @@ SCALER_META_PATH = "vae_base_scaler_meta_v5_v1temp_oracle.json"
 TRAIN_CFG_PATH   = "train_config_v5_v1temp_oracle.json"
 OUTPUT_CSV_PATH  = "forecast_output.csv"
 
+# Feeder to forecast.  Set to a feeder ID string (e.g. "FEEDER_123") to
+# select a specific feeder from a multi-feeder CSV.  Set to None to use the
+# first feeder found in the FEEDER column, or to skip filtering altogether
+# when the CSV has no FEEDER column.
+FEEDER_ID        = None
+
 # Blend weight for the blended decoder (0.0 = pure prior-week, 1.0 = pure AR).
 # Tune this against actuals: lower values reduce error compounding at the cost
 # of relying more heavily on last week's load pattern.
@@ -392,18 +398,51 @@ EVENT_TIMESTAMPS = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run():
+def run(feeder_id=None):
+    """
+    Run week-ahead inference and produce a forecast CSV + plot.
+
+    Parameters
+    ----------
+    feeder_id : str or None
+        Feeder to forecast.  Overrides the module-level FEEDER_ID when
+        provided.  Pass None to fall back to the FEEDER_ID config variable.
+        If neither is set and the CSV has a FEEDER column, the first feeder
+        found in that column is used.
+    """
+    _feeder = feeder_id if feeder_id is not None else FEEDER_ID
+
     df = pd.read_csv(CSV_PATH)
     df.columns = [c.strip() for c in df.columns]
-
-    if len(df) < 336:
-        raise ValueError(
-            f"CSV must have at least 336 rows (168 past + 168 forecast). Found {len(df)}."
-        )
 
     for col in [COL_LOAD, COL_TEMP, COL_HUMIDITY, COL_HEATINDEX]:
         if col not in df.columns:
             raise ValueError(f"Missing required column: '{col}'")
+
+    # ── Feeder filtering ─────────────────────────────────────────────────────
+    feeder_label = ""
+    if "FEEDER" in df.columns:
+        if _feeder is not None:
+            feeder_label = str(_feeder)
+            df = df[df["FEEDER"].astype(str) == feeder_label].reset_index(drop=True)
+            if df.empty:
+                available = df["FEEDER"].unique().tolist()
+                raise ValueError(
+                    f"No rows found for FEEDER='{_feeder}'. "
+                    f"Available feeders: {available}"
+                )
+        else:
+            # Default: use whichever feeder appears first.
+            feeder_label = str(df["FEEDER"].iloc[0])
+            df = df[df["FEEDER"].astype(str) == feeder_label].reset_index(drop=True)
+            print(f"No FEEDER_ID specified — using first feeder found: '{feeder_label}'")
+
+    if len(df) < 336:
+        raise ValueError(
+            f"CSV must have at least 336 rows (168 past + 168 forecast) "
+            f"{'for feeder ' + repr(feeder_label) + ' ' if feeder_label else ''}— "
+            f"found {len(df)}."
+        )
 
     past  = df.iloc[:168]
     fcast = df.iloc[168:336]
@@ -454,7 +493,6 @@ def run():
         print(f"  Actual              KWH range : {actual_kwh.min():.3f} – {actual_kwh.max():.3f}")
 
     out_png = OUTPUT_CSV_PATH.replace(".csv", ".png")
-    feeder_id = df["FEEDER"].iloc[0] if "FEEDER" in df.columns else ""
     plot_forecast(
         past_load           = past[COL_LOAD].to_numpy(dtype=float),
         mu_kwh              = mu_bl,
@@ -464,7 +502,7 @@ def run():
         past_timestamps     = past[COL_TIME].values,
         forecast_timestamps = fcast[COL_TIME].values,
         out_png             = out_png,
-        feeder              = str(feeder_id),
+        feeder              = feeder_label,
         actual_load         = actual_kwh,
         mu_kwh_pw           = mu_pw,
         std_kwh_pw          = std_pw,
@@ -475,4 +513,5 @@ def run():
     return out_df
 
 
-run()
+if __name__ == "__main__":
+    run()
