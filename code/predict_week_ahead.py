@@ -288,8 +288,8 @@ def plot_forecast(
     event_timestamps=None,             # list of timestamps to mark as outage/event lines
     show_fig: bool = True,             # True = display inline (notebook); False = save only
 ):
-    past_dt     = pd.to_datetime(past_timestamps)
-    forecast_dt = pd.to_datetime(forecast_timestamps)
+    past_dt     = pd.to_datetime(past_timestamps).tz_localize("UTC").tz_convert("America/Chicago")
+    forecast_dt = pd.to_datetime(forecast_timestamps).tz_localize("UTC").tz_convert("America/Chicago")
 
     fig, ax = plt.subplots(figsize=(14, 5.0))
 

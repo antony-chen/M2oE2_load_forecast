@@ -391,7 +391,11 @@ def plot_one_week(
         return None
 
     history_start = decoder_week_start_ts - pd.Timedelta(hours=168)
-    full_time = pd.date_range(start=history_start, periods=total_len, freq="h")
+    full_time = (
+        pd.date_range(start=history_start, periods=total_len, freq="h")
+          .tz_localize("UTC")
+          .tz_convert("America/Chicago")
+    )
 
     def to_dt(x_steps):
         if len(x_steps) == 0:
@@ -437,8 +441,9 @@ def plot_one_week(
                     fontsize=7, color="darkorange", va="top", ha="right", zorder=6)
 
     ax.set_ylabel(f"Load ({load_unit})")
+    week_cst = pd.to_datetime(decoder_week_start_ts, utc=True).tz_convert("America/Chicago")
     ax.set_title(
-        f"{tag} | XFMR={xfmr} | Week={pd.to_datetime(decoder_week_start_ts).date()} | sample={sample_index}\n"
+        f"{tag} | XFMR={xfmr} | Week={week_cst.date()} | sample={sample_index}\n"
         f"XLSX={xlsx_tag} | model={model_base}"
     )
 

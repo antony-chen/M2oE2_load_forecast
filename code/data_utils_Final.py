@@ -1255,7 +1255,12 @@ def _oncor_load_weekly_utils(
             f"Available columns: {df.columns.tolist()}"
         )
 
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+    df[time_col] = (
+        pd.to_datetime(df[time_col], errors="coerce")
+          .dt.tz_localize("America/Chicago", ambiguous="infer", nonexistent="shift_forward")
+          .dt.tz_convert("UTC")
+          .dt.tz_localize(None)   # store as naive UTC
+    )
     df = df.dropna(subset=[time_col]).sort_values(time_col)
 
     if group_col not in df.columns:
