@@ -434,7 +434,7 @@ def plot_one_week(
     if event_timestamps:
         trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
         for i, ets in enumerate(event_timestamps):
-            ets_dt = pd.to_datetime(ets)
+            ets_dt = pd.to_datetime(ets).tz_localize("America/Chicago", ambiguous="infer", nonexistent="shift_forward")
             evt_label = f"Event {i + 1}" if len(event_timestamps) > 1 else "Event"
             ax.axvline(ets_dt, color="darkorange", linewidth=1.8, linestyle="-.", zorder=5, label=evt_label)
             ax.text(ets_dt, 0.97, evt_label, transform=trans, rotation=90,
