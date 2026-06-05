@@ -1348,6 +1348,20 @@ if __name__ == "__main__":
         data_export_list=plot_data_frames,
     )
 
+    # Full-horizon forecast for every test week
+    trajectory, trajectory_std, max_load, max_load_hour = get_full_horizon_forecast(
+        model=model_base,
+        enc_l=test_data_eval_all['X_enc_l'],
+        enc_ext=test_data_eval_all['X_enc_ext'],
+        dec_l=test_data_eval_all['X_dec_in_l'],
+        dec_ext=test_data_eval_all['X_dec_in_ext'],
+        scaler=scalers['load'],
+        device=device,
+    )
+    print(f"[FORECAST] Full-horizon forecast computed for {trajectory.shape[0]} test weeks.")
+    for i in range(min(3, trajectory.shape[0])):
+        print(f"  Week {i}: peak={max_load[i]:.2f} kW at hour {max_load_hour[i]}")
+
     if plot_data_frames:
         final_plot_df = pd.concat(plot_data_frames, ignore_index=True)
         final_plot_df["XFMR"] = int(EVAL_XFMR)
