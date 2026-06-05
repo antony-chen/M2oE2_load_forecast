@@ -734,6 +734,67 @@ def _evaluate_peak_batch(preds_4d, tgts_4d):
 
 
 # ============================================================
+# Full-horizon forecast reconstruction
+# ============================================================
+
+@torch.no_grad()
+def get_full_horizon_forecast(model, enc_l, enc_ext, dec_l, dec_ext, scaler, device):
+    """
+    Run one forward pass and reconstruct the full 168-hour forecast trajectory
+    by averaging overlapping output windows.
+
+    Args:
+        model:               trained VariationalSeq2Seq_meta
+        enc_l:               [B, 168, 1]   encoder load (normalized)
+        enc_ext:             [B, 168, K]   encoder external features (normalized)
+        dec_l:               [B, L, 1]     decoder load input (normalized)
+        dec_ext:             [B, L, K]     decoder external features (normalized)
+        scaler:              fitted MinMaxScaler for load
+        device:              torch.device
+
+    Returns:
+        trajectory:          np.ndarray [B, 168]  denormalized load forecast (kW)
+        trajectory_std:      np.ndarray [B, 168]  denormalized 1-sigma uncertainty
+        max_load:            np.ndarray [B]        peak forecast value per sample (kW)
+        max_load_hour:       np.ndarray [B]        hour index of peak per sample
+    """
+    model.eval()
+    enc_l   = enc_l.to(device)
+    enc_ext = enc_ext.to(device)
+    dec_l   = dec_l.to(device)
+    dec_ext = dec_ext.to(device)
+
+    mu_preds, logvar_preds, _, _ = model(enc_l, enc_ext, dec_l, dec_ext)
+    # mu_preds:      [B, L+1, output_len, 1]
+    # logvar_preds:  [B, L+1, output_len, 1]
+
+    mu_preds     = mu_preds.squeeze(-1)      # [B, L+1, output_len]
+    logvar_preds = logvar_preds.squeeze(-1)  # [B, L+1, output_len]
+
+    B = mu_preds.size(0)
+    trajectories     = []
+    trajectories_std = []
+
+    for i in range(B):
+        traj_mu  = reconstruct_sequence(mu_preds[i])       # [168]
+        traj_var = reconstruct_sequence(logvar_preds[i].exp())  # average variance windows
+        trajectories.append(traj_mu.cpu().numpy())
+        trajectories_std.append(np.sqrt(traj_var.cpu().numpy()))
+
+    trajectory     = np.stack(trajectories,     axis=0)  # [B, 168]
+    trajectory_std = np.stack(trajectories_std, axis=0)  # [B, 168]
+
+    # denormalize using load scaler
+    trajectory     = scaler.inverse_transform(trajectory)
+    trajectory_std = trajectory_std * (scaler.data_max_ - scaler.data_min_)
+
+    max_load      = trajectory.max(axis=1)       # [B]
+    max_load_hour = trajectory.argmax(axis=1)    # [B]
+
+    return trajectory, trajectory_std, max_load, max_load_hour
+
+
+# ============================================================
 # Evaluation
 # ============================================================
 
