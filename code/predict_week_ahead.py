@@ -267,7 +267,16 @@ def predict_week_ahead(
     mu_bl, std_bl = _denorm(mu_bl_preds, logvar_bl_preds)
     mu_pw, std_pw = _denorm(mu_pw_preds, logvar_pw_preds)
 
-    return mu_bl, std_bl, mu_pw, std_pw
+    # Extract non-overlapping 24-hour windows spaced every output_len steps.
+    # Window i starts at decoder step i*output_len and covers hours
+    # [i*output_len, (i+1)*output_len) of the forecast week.
+    lo, hi = meta["load_min"], meta["load_max"]
+    win_indices = list(range(0, mu_bl_preds.shape[1], output_len))
+    daily_windows = (
+        mu_bl_preds[0, win_indices, :, 0].cpu().numpy() * (hi - lo) + lo
+    )  # [num_windows, output_len]
+
+    return mu_bl, std_bl, mu_pw, std_pw, daily_windows
 
 
 # ── Plot ─────────────────────────────────────────────────────────────────────
@@ -286,12 +295,27 @@ def plot_forecast(
     mu_kwh_pw: np.ndarray = None,      # [168] prior-week forecast mean, if available
     std_kwh_pw: np.ndarray = None,     # [168] prior-week forecast std,  if available
     event_timestamps=None,             # list of timestamps to mark as outage/event lines
+    daily_windows: np.ndarray = None,  # [num_windows, 24] non-overlapping 24h forecast windows
     show_fig: bool = True,             # True = display inline (notebook); False = save only
 ):
     past_dt     = pd.to_datetime(past_timestamps).tz_localize("UTC").tz_convert("America/Chicago")
     forecast_dt = pd.to_datetime(forecast_timestamps).tz_localize("UTC").tz_convert("America/Chicago")
 
     fig, ax = plt.subplots(figsize=(14, 5.0))
+
+    # Non-overlapping 24-hour decoder windows, drawn before the averaged lines
+    # so they sit underneath.
+    if daily_windows is not None:
+        output_len = daily_windows.shape[1]
+        for i, window in enumerate(daily_windows):
+            start = i * output_len
+            end   = start + output_len
+            if end > len(forecast_dt):
+                break
+            seg_dt = forecast_dt[start:end]
+            label  = "24h windows" if i == 0 else None
+            ax.plot(seg_dt, window, color="purple", linewidth=1.0,
+                    linestyle="-", alpha=0.55, label=label)
 
     # Load: history and both forecasts
     ax.plot(past_dt, past_load, color="black", linewidth=1.5, label="History")
@@ -447,7 +471,7 @@ def run(feeder_id=None):
     past  = df.iloc[:168]
     fcast = df.iloc[168:336]
 
-    mu_bl, std_bl, mu_pw, std_pw = predict_week_ahead(
+    mu_bl, std_bl, mu_pw, std_pw, daily_windows = predict_week_ahead(
         checkpoint_path         = CHECKPOINT_PATH,
         scaler_meta_path        = SCALER_META_PATH,
         train_cfg_path          = TRAIN_CFG_PATH,
@@ -507,6 +531,7 @@ def run(feeder_id=None):
         mu_kwh_pw           = mu_pw,
         std_kwh_pw          = std_pw,
         event_timestamps    = EVENT_TIMESTAMPS,
+        daily_windows       = daily_windows,
         show_fig            = True,
     )
 
