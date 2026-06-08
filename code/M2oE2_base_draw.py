@@ -387,6 +387,11 @@ def plot_one_week(
 
     temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
 
+    # 24-hour window colors (7 windows per decoder week)
+    WINDOW_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                     "#9467bd", "#8c564b", "#e377c2"]
+    WINDOW_HOURS = 24
+
     plt.figure(figsize=(12, 3.6))
     ax = plt.gca()
 
@@ -396,20 +401,49 @@ def plot_one_week(
     if len(base["x_t"]) > 0:
         ax.plot(to_dt(base["x_t"]), base["true"], linestyle="--", color="red", linewidth=1.5, label="True")
 
-    # Base pred
+    # 24-hour forecast windows
     if len(base["x_p"]) > 0:
-        ax.plot(to_dt(base["x_p"]), base["pred"], color="blue", alpha=0.9, linewidth=1.5, label="Base (mean)")
-        if len(base["std"]) == len(base["pred"]) and len(base["std"]) > 0:
-            ax.fill_between(
-                to_dt(base["x_p"]),
-                base["pred"] - base["std"],
-                base["pred"] + base["std"],
-                color="blue", alpha=0.15, label="Base (±1σ)"
-            )
+        x_p = base["x_p"].astype(int)
+        pred = base["pred"]
+        std  = base["std"] if len(base["std"]) == len(pred) else None
 
-    # split marker
+        # x_p starts at encoder_len (168); decoder hour = x_p - encoder_len
+        enc_len = int(x_p[0]) if len(x_p) > 0 else 168
+        dec_hours = x_p - enc_len                          # 0-based decoder hour for each pred point
+        n_windows = int(np.ceil(dec_hours.max() + 1) / WINDOW_HOURS) if len(dec_hours) > 0 else 0
+
+        added_band_label = False
+        for w in range(n_windows):
+            win_start = w * WINDOW_HOURS
+            win_end   = win_start + WINDOW_HOURS
+            mask = (dec_hours >= win_start) & (dec_hours < win_end)
+            if not mask.any():
+                continue
+
+            color   = WINDOW_COLORS[w % len(WINDOW_COLORS)]
+            x_win   = to_dt(x_p[mask])
+            y_win   = pred[mask]
+            label   = f"Forecast D{w+1} (h{win_start}–{win_end-1})"
+
+            ax.plot(x_win, y_win, color=color, linewidth=1.5, alpha=0.9, label=label)
+
+            if std is not None:
+                band_label = "±1σ" if not added_band_label else None
+                ax.fill_between(x_win, y_win - std[mask], y_win + std[mask],
+                                color=color, alpha=0.15, label=band_label)
+                added_band_label = True
+
+            # vertical boundary at start of each window (except window 0)
+            if w > 0:
+                boundary_step = np.array([enc_len + win_start])
+                if boundary_step[0] <= x_p.max():
+                    bx = to_dt(boundary_step)
+                    if len(bx):
+                        ax.axvline(bx[0], color=color, linestyle=":", linewidth=0.8, alpha=0.5)
+
+    # encoder/decoder split marker
     if total_len > 168:
-        ax.axvline(full_time[167], color="grey", linestyle="--", alpha=0.5)
+        ax.axvline(full_time[167], color="grey", linestyle="--", alpha=0.5, label="Enc/Dec split")
 
     ax.set_ylabel(f"Load ({load_unit})")
     ax.set_xlabel("Date")
