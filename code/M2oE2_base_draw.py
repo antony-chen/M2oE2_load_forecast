@@ -176,6 +176,17 @@ def denorm_pack_load(pack, meta):
     if len(pack["true"]) > 0: pack["true"] = denorm_minmax(pack["true"], load_min, load_max)
     if len(pack["pred"]) > 0: pack["pred"] = denorm_minmax(pack["pred"], load_min, load_max)
     if len(pack["std"])  > 0: pack["std"]  = pack["std"] * load_scale
+
+    # denormalize 24-hour forecast windows
+    denormed_windows = {}
+    for dec_pos, win in pack.get("windows", {}).items():
+        denormed_windows[dec_pos] = {
+            "x":   win["x"],
+            "mu":  denorm_minmax(win["mu"], load_min, load_max) if len(win["mu"]) > 0 else win["mu"],
+            "std": win["std"] * load_scale if len(win["std"]) > 0 else win["std"],
+        }
+    pack["windows"] = denormed_windows
+
     return pack
 
 
