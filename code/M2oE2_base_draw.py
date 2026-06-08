@@ -387,9 +387,7 @@ def plot_one_week(
 
     temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
 
-    # 24-hour window colors (7 windows per decoder week)
-    WINDOW_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-                     "#9467bd", "#8c564b", "#e377c2"]
+    WINDOW_COLOR = "blue"
     WINDOW_HOURS = 24
 
     plt.figure(figsize=(12, 3.6))
@@ -420,17 +418,16 @@ def plot_one_week(
             if not mask.any():
                 continue
 
-            color   = WINDOW_COLORS[w % len(WINDOW_COLORS)]
             x_win   = to_dt(x_p[mask])
             y_win   = pred[mask]
-            label   = f"Forecast D{w+1} (h{win_start}–{win_end-1})"
+            label   = "Forecast (mean)" if w == 0 else None
 
-            ax.plot(x_win, y_win, color=color, linewidth=1.5, alpha=0.9, label=label)
+            ax.plot(x_win, y_win, color=WINDOW_COLOR, linewidth=1.5, alpha=0.9, label=label)
 
             if std is not None:
                 band_label = "±1σ" if not added_band_label else None
                 ax.fill_between(x_win, y_win - std[mask], y_win + std[mask],
-                                color=color, alpha=0.15, label=band_label)
+                                color=WINDOW_COLOR, alpha=0.15, label=band_label)
                 added_band_label = True
 
             # vertical boundary at start of each window (except window 0)
@@ -439,7 +436,7 @@ def plot_one_week(
                 if boundary_step[0] <= x_p.max():
                     bx = to_dt(boundary_step)
                     if len(bx):
-                        ax.axvline(bx[0], color=color, linestyle=":", linewidth=0.8, alpha=0.5)
+                        ax.axvline(bx[0], color=WINDOW_COLOR, linestyle=":", linewidth=0.8, alpha=0.5)
 
     # encoder/decoder split marker
     if total_len > 168:
