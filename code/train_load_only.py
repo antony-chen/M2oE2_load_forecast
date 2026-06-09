@@ -203,18 +203,20 @@ def load_csv(csv_path, feeder_names, col_overrides):
         df["_feeder"] = "ALL"
         feeder_col = "_feeder"
 
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+    df[time_col]   = pd.to_datetime(df[time_col], errors="coerce")
+    df[feeder_col] = df[feeder_col].astype(str).str.strip()   # always string, no whitespace
     df = df.dropna(subset=[time_col]).sort_values(time_col)
     df[load_col] = pd.to_numeric(df[load_col], errors="coerce").fillna(0.0)
 
-    available = df[feeder_col].unique().tolist()
+    available = sorted(df[feeder_col].unique().tolist())
     print(f"\n  [CSV] Available feeders ({len(available)}): {available}")
 
     if feeder_names:
-        missing = [f for f in feeder_names if str(f) not in [str(a) for a in available]]
+        feeder_names = [str(f).strip() for f in feeder_names]
+        missing = [f for f in feeder_names if f not in available]
         if missing:
             raise ValueError(f"Feeders not found in CSV: {missing}\nAvailable: {available}")
-        df = df[df[feeder_col].astype(str).isin([str(f) for f in feeder_names])]
+        df = df[df[feeder_col].isin(feeder_names)]
 
     col_map = {
         "load":     load_col,
