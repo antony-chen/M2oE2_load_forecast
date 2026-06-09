@@ -442,14 +442,26 @@ def make_loader(d, batch_size, shuffle):
 
 
 # ===========================================================================
-# Loss helpers
+# Loss helpers — match v7_peak_fidelity_loss in main_M2oE2_Final exactly
 # ===========================================================================
 def gaussian_nll(mu, logvar, y):
     logvar = logvar.clamp(LOGVAR_MIN, LOGVAR_MAX)
     return 0.5 * (logvar + math.log(2 * math.pi) + (y - mu) ** 2 / (logvar.exp() + 1e-12))
 
 
+def gaussian_icdf(p, device):
+    return torch.sqrt(torch.tensor(2.0, device=device)) * torch.special.erfinv(
+        2 * torch.as_tensor(p, device=device) - 1
+    )
+
+
+def pinball_loss(y, yq, q):
+    e = y - yq
+    return torch.where(e >= 0, q * e, (q - 1) * e)
+
+
 def soft_threshold_mask(y, thr_frac, tau):
+    """Peak-region weight: sigmoid ramp above thr_frac * max(y)."""
     B    = y.size(0)
     ymax = y.reshape(B, -1).max(dim=1, keepdim=True).values.view(B, 1, 1)
     return torch.sigmoid((y - thr_frac * ymax) / (tau + 1e-12))
@@ -462,25 +474,47 @@ def softargmax_time(y, temp):
 
 
 def peak_fidelity_loss(mu_preds, logvar_preds, tgt, w_peak):
-    mu_fh  = mu_preds[:, :, 0]
-    tgt_fh = tgt[:, :, 0]
-    B      = tgt_fh.size(0)
+    """
+    Mirrors v7_peak_fidelity_loss from main_M2oE2_Final:
+      - L_thr : weighted MSE, normalised by sum of peak weights (not plain mean)
+      - L_q   : Gaussian quantile pinball, peak-weighted
+      - L_time: absolute peak-timing error, normalised by sequence length
+      - L_amp : peak amplitude MSE across full decoder
+      - L_topk: top-k hours MSE across full decoder
+    NLL is computed and added separately in the training loop.
+    """
+    mu   = mu_preds.squeeze(-1)     # [B, L+1, output_len]
+    y    = tgt.squeeze(-1)
+    logv = logvar_preds.squeeze(-1).clamp(LOGVAR_MIN, LOGVAR_MAX)
+    sigma = (0.5 * logv).exp()
 
-    w     = soft_threshold_mask(tgt_fh.unsqueeze(-1), THR_FRAC, TAU).squeeze(-1)
-    L_thr = (w * (mu_fh - tgt_fh) ** 2).mean()
+    w = soft_threshold_mask(y, THR_FRAC, TAU)          # [B, L+1, output_len]
 
-    err   = tgt_fh - mu_fh
-    L_q   = torch.max(Q_UPPER * err, (Q_UPPER - 1) * err).mean()
+    # 1) Weighted threshold MSE (normalised by weight sum, not count)
+    err2  = (mu - y).pow(2)
+    L_thr = (w * err2).sum() / (w.sum() + 1e-12)
 
-    L_time = ((softargmax_time(mu_fh, SOFTARG_T) -
-               softargmax_time(tgt_fh, SOFTARG_T)) ** 2).mean()
+    # 2) Gaussian quantile pinball, peak-weighted
+    zq    = gaussian_icdf(Q_UPPER, device=mu.device)
+    yq    = mu + zq * sigma
+    pl    = pinball_loss(y, yq, Q_UPPER)
+    L_q   = (w * pl).sum() / (w.sum() + 1e-12)
 
-    L_amp  = ((mu_fh.reshape(B, -1).max(dim=1).values -
-               tgt_fh.reshape(B, -1).max(dim=1).values) ** 2).mean()
+    # 3) Peak timing: absolute error normalised by sequence length
+    B, L1, out = y.shape
+    y_flat  = y.reshape(B, -1)
+    mu_flat = mu.reshape(B, -1)
+    T       = y_flat.size(1)
+    L_time  = (softargmax_time(mu_flat, SOFTARG_T) -
+               softargmax_time(y_flat,  SOFTARG_T)).abs().mean() / (T + 1e-12)
 
-    k      = min(TOPK_K, mu_fh.size(1))
-    L_topk = ((torch.topk(mu_fh, k, dim=1).values -
-               torch.topk(tgt_fh, k, dim=1).values) ** 2).mean()
+    # 4) Peak amplitude MSE (full decoder)
+    L_amp  = ((mu_flat.max(dim=1).values - y_flat.max(dim=1).values) ** 2).mean()
+
+    # 5) Top-k hours MSE (full decoder)
+    k      = min(TOPK_K, mu_flat.size(1))
+    L_topk = ((torch.topk(mu_flat, k, dim=1).values -
+               torch.topk(y_flat,  k, dim=1).values) ** 2).mean()
 
     return w_peak * (LAM_THR * L_thr + LAM_Q * L_q +
                      LAM_TIME * L_time + LAM_AMP * L_amp + LAM_TOPK * L_topk)
@@ -499,6 +533,7 @@ def train_model(model, loader, total_epochs, device, save_path):
         running = 0.0
         w_peak  = min(1.0, ep / max(1, PEAK_WARMUP_EPOCHS))
 
+        skipped = 0
         for enc_l, enc_ext, dec_l, dec_ext, tgt in loader:
             optimizer.zero_grad()
             mu_preds, logvar_preds, mu_z, logvar_z = model(
@@ -510,20 +545,32 @@ def train_model(model, loader, total_epochs, device, save_path):
             peak = peak_fidelity_loss(mu_preds, logvar_preds, tgt, w_peak)
             loss = nll + KL_WEIGHT * kl + peak
 
+            # skip non-finite batches rather than corrupting weights
+            if not torch.isfinite(loss):
+                skipped += 1
+                continue
+
             loss.backward()
             if GRAD_CLIP > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
             running += loss.item() * enc_l.size(0)
 
-        epoch_loss = running / len(loader.dataset)
-        if epoch_loss < best_loss:
+        # correct denominator for skipped batches
+        denom      = max(1, len(loader.dataset) - skipped * loader.batch_size)
+        epoch_loss = running / denom
+
+        # don't save best until peak warmup has fully ramped (mirrors main)
+        can_save = (ep >= PEAK_WARMUP_EPOCHS)
+        if can_save and epoch_loss < best_loss:
             best_loss, best_epoch = epoch_loss, ep
             torch.save(model.state_dict(), save_path)
 
         if ep % 50 == 0 or ep == 1:
+            best_str = f"{best_loss:.5f} (ep {best_epoch})" if best_epoch >= 0 \
+                       else "N/A (warmup phase)"
             print(f"  Epoch {ep:4d}/{total_epochs}  loss={epoch_loss:.5f}  "
-                  f"best={best_loss:.5f} (ep {best_epoch})  peak_w={w_peak:.2f}")
+                  f"best={best_str}  peak_w={w_peak:.2f}  skipped={skipped}")
 
     print(f"\n[✓] Best model saved: '{save_path}'  (epoch {best_epoch}, loss {best_loss:.5f})")
     return best_loss
