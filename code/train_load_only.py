@@ -517,7 +517,13 @@ def peak_fidelity_loss(mu_preds, logvar_preds, tgt, w_peak):
                torch.topk(y_flat,  k, dim=1).values) ** 2).mean()
 
     return w_peak * (LAM_THR * L_thr + LAM_Q * L_q +
-                     LAM_TIME * L_time + LAM_AMP * L_amp + LAM_TOPK * L_topk)
+                     LAM_TIME * L_time + LAM_AMP * L_amp + LAM_TOPK * L_topk), {
+        "thr":  float(L_thr.detach().cpu()),
+        "q":    float(L_q.detach().cpu()),
+        "time": float(L_time.detach().cpu()),
+        "amp":  float(L_amp.detach().cpu()),
+        "topk": float(L_topk.detach().cpu()),
+    }
 
 
 # ===========================================================================
@@ -530,22 +536,29 @@ def train_model(model, loader, total_epochs, device, save_path):
 
     for ep in range(1, total_epochs + 1):
         model.train()
-        running = 0.0
-        w_peak  = min(1.0, ep / max(1, PEAK_WARMUP_EPOCHS))
+        running  = 0.0
+        skipped  = 0
+        sum_parts = {"nll": 0.0, "thr": 0.0, "q": 0.0, "time": 0.0,
+                     "amp": 0.0, "topk": 0.0, "kl": 0.0}
+        cnt_parts = 0
+        w_peak = min(1.0, ep / max(1, PEAK_WARMUP_EPOCHS))
+        lam_thr_ep  = LAM_THR  * w_peak
+        lam_q_ep    = LAM_Q    * w_peak
+        lam_time_ep = LAM_TIME * w_peak
+        lam_amp_ep  = LAM_AMP  * w_peak
+        lam_topk_ep = LAM_TOPK * w_peak
 
-        skipped = 0
         for enc_l, enc_ext, dec_l, dec_ext, tgt in loader:
             optimizer.zero_grad()
             mu_preds, logvar_preds, mu_z, logvar_z = model(
                 enc_l, enc_ext, dec_l, dec_ext,
                 epoch=ep, top_k=TOP_K, warmup_epochs=WARMUP_EP,
             )
-            nll  = gaussian_nll(mu_preds, logvar_preds, tgt).mean()
-            kl   = -0.5 * (1 + logvar_z - mu_z ** 2 - logvar_z.exp()).mean()
-            peak = peak_fidelity_loss(mu_preds, logvar_preds, tgt, w_peak)
-            loss = nll + KL_WEIGHT * kl + peak
+            nll        = gaussian_nll(mu_preds, logvar_preds, tgt).mean()
+            kl         = -0.5 * (1 + logvar_z - mu_z ** 2 - logvar_z.exp()).mean()
+            peak, parts = peak_fidelity_loss(mu_preds, logvar_preds, tgt, w_peak)
+            loss       = nll + KL_WEIGHT * kl + peak
 
-            # skip non-finite batches rather than corrupting weights
             if not torch.isfinite(loss):
                 skipped += 1
                 continue
@@ -556,23 +569,41 @@ def train_model(model, loader, total_epochs, device, save_path):
             optimizer.step()
             running += loss.item() * enc_l.size(0)
 
-        # correct denominator for skipped batches
+            sum_parts["nll"]  += float(nll.detach().cpu())
+            sum_parts["kl"]   += float(kl.detach().cpu())
+            for k, v in parts.items():
+                sum_parts[k] += v
+            cnt_parts += 1
+
         denom      = max(1, len(loader.dataset) - skipped * loader.batch_size)
         epoch_loss = running / denom
 
-        # don't save best until peak warmup has fully ramped (mirrors main)
         can_save = (ep >= PEAK_WARMUP_EPOCHS)
         if can_save and epoch_loss < best_loss:
             best_loss, best_epoch = epoch_loss, ep
             torch.save(model.state_dict(), save_path)
 
-        if ep % 50 == 0 or ep == 1:
-            best_str = f"{best_loss:.5f} (ep {best_epoch})" if best_epoch >= 0 \
+        if ep == 1 or ep % 5 == 0 or ep == total_epochs:
+            best_str = f"{best_loss:.6f} (ep {best_epoch})" if best_epoch >= 0 \
                        else "N/A (warmup phase)"
-            print(f"  Epoch {ep:4d}/{total_epochs}  loss={epoch_loss:.5f}  "
-                  f"best={best_str}  peak_w={w_peak:.2f}  skipped={skipped}")
+            print(
+                f"Epoch {ep:4d}/{total_epochs} | loss={epoch_loss:.6f} | best={best_str} | "
+                f"lam_thr={lam_thr_ep:.3f} lam_q={lam_q_ep:.3f} "
+                f"lam_time={lam_time_ep:.3f} lam_amp={lam_amp_ep:.3f} "
+                f"lam_topk={lam_topk_ep:.3f} | skipped={skipped}"
+            )
+            if cnt_parts > 0:
+                p = {k: v / cnt_parts for k, v in sum_parts.items()}
+                print(
+                    f"  [parts] nll={p['nll']:.4f} thr={p['thr']:.4f} q={p['q']:.4f} "
+                    f"time={p['time']:.4f} amp={p['amp']:.4f} topk={p['topk']:.4f} "
+                    f"kl={p['kl']:.4f} | weighted: "
+                    f"+{lam_thr_ep*p['thr']:.4f} +{lam_q_ep*p['q']:.4f} "
+                    f"+{lam_time_ep*p['time']:.4f} +{lam_amp_ep*p['amp']:.4f} "
+                    f"+{lam_topk_ep*p['topk']:.4f} +{KL_WEIGHT*p['kl']:.4f}"
+                )
 
-    print(f"\n[✓] Best model saved: '{save_path}'  (epoch {best_epoch}, loss {best_loss:.5f})")
+    print(f"\n[✓] Best model saved: '{save_path}'  (epoch {best_epoch}, loss {best_loss:.6f})")
     return best_loss
 
 
