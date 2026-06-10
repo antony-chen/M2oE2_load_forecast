@@ -2,8 +2,8 @@
 This file will draw the two time period of the dataset, the "temperature sudden change" (Top1) and the "load sudden change" (Top1).
 Goal
 ----
-1) Find the week with the largest "temperature sudden change" (Top1) for a target XFMR.
-2) Find the week with the largest "load sudden change" (Top1) for a target XFMR.
+1) Find the week with the largest "temperature sudden change" (Top1) for a target FEEDER.
+2) Find the week with the largest "load sudden change" (Top1) for a target FEEDER.
 3) For each Top1 week, plot (base-only) with your existing style:
    - History (black) + True (red) + Base pred (blue) + Base ±1σ
    - Temperature on secondary axis
@@ -42,7 +42,7 @@ XLSX_PATH = "vae_base_only_v5_XFMR125916888.xlsx"
 # e.g. "vae_base_scaler_meta_v5_v1temp_oracle.json"
 SCALER_META_JSON = "vae_base_scaler_meta_v5.json"
 
-TARGET_XFMR = data1
+TARGET_FEEDER = "data1"
 ENCODER_LEN_WEEKS = 1
 
 BASE_MODEL_KEYS = ["VAE_BASE_V5", "BASE_V5", "BASE"]
@@ -183,11 +183,12 @@ def _guess_col(df, candidates):
     return None
 
 
-def load_hourly_df(csv_path: str, xfmr: int):
+def load_hourly_df(csv_path: str, feeder: str):
     df = pd.read_csv(csv_path)
-    df = df[df["XFMR"] == xfmr].copy()
+    df["FEEDER"] = df["FEEDER"].astype(str).str.strip()
+    df = df[df["FEEDER"] == str(feeder)].copy()
     if df.empty:
-        raise ValueError(f"No rows for XFMR={xfmr} in {csv_path}")
+        raise ValueError(f"No rows for FEEDER={feeder} in {csv_path}")
 
     df["DATE1"] = pd.to_datetime(df["DATE1"])
     df["ts"] = df["DATE1"] + pd.to_timedelta(df["HOUR1"].astype(int), unit="h")
@@ -217,7 +218,7 @@ def load_hourly_df(csv_path: str, xfmr: int):
 
     week_start = hourly.groupby("week_idx")["ts"].min().rename("week_start_ts").reset_index()
 
-    print(f"[CSV] XFMR {xfmr} time range: {hourly['ts'].min()} -> {hourly['ts'].max()}")
+    print(f"[CSV] FEEDER {feeder} time range: {hourly['ts'].min()} -> {hourly['ts'].max()}")
     print(f"[CSV] temp_col={temp_col} | load_col={load_col if load_col is not None else '(NOT FOUND)'}")
     return hourly, week_start, temp_col, load_col
 
@@ -311,11 +312,12 @@ def compute_load_shock_from_xlsx(df_xlsx: pd.DataFrame, meta: dict, model_base: 
 # =========================
 # Plot utilities
 # =========================
-def load_temp_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp, periods: int):
+def load_temp_from_csv(csv_path: str, feeder: str, start_ts: pd.Timestamp, periods: int):
     df = pd.read_csv(csv_path)
-    df = df[df["XFMR"] == xfmr].copy()
+    df["FEEDER"] = df["FEEDER"].astype(str).str.strip()
+    df = df[df["FEEDER"] == str(feeder)].copy()
     if df.empty:
-        raise ValueError(f"No rows for XFMR={xfmr} in {csv_path}")
+        raise ValueError(f"No rows for FEEDER={feeder} in {csv_path}")
 
     df["DATE1"] = pd.to_datetime(df["DATE1"])
     df["ts"] = df["DATE1"] + pd.to_timedelta(df["HOUR1"].astype(int), unit="h")
@@ -331,7 +333,7 @@ def load_temp_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp, periods
     return idx, out.to_numpy()
 
 
-def load_model_inputs_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp, periods: int):
+def load_model_inputs_from_csv(csv_path: str, feeder: str, start_ts: pd.Timestamp, periods: int):
     """
     Reload the raw weather inputs that feed the model's three "experts":
       - thermal expert: temperature (+ derived CDD/HDD)
@@ -341,9 +343,10 @@ def load_model_inputs_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp,
     Missing columns are simply omitted from the dict.
     """
     df = pd.read_csv(csv_path)
-    df = df[df["XFMR"] == xfmr].copy()
+    df["FEEDER"] = df["FEEDER"].astype(str).str.strip()
+    df = df[df["FEEDER"] == str(feeder)].copy()
     if df.empty:
-        raise ValueError(f"No rows for XFMR={xfmr} in {csv_path}")
+        raise ValueError(f"No rows for FEEDER={feeder} in {csv_path}")
 
     df["DATE1"] = pd.to_datetime(df["DATE1"])
     df["ts"] = df["DATE1"] + pd.to_timedelta(df["HOUR1"].astype(int), unit="h")
@@ -370,7 +373,7 @@ def load_model_inputs_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp,
     return idx, out, col_map
 
 
-def log_model_inputs(csv_path, xfmr, history_start, decoder_week_start_ts, total_len, sample_index, tag, out_dir=None):
+def log_model_inputs(csv_path, feeder, history_start, decoder_week_start_ts, total_len, sample_index, tag, out_dir=None):
     """
     Print (and optionally save) a summary of the actual encoder/decoder inputs
     used to produce a given forecast, so the chart can be cross-checked against
@@ -379,10 +382,10 @@ def log_model_inputs(csv_path, xfmr, history_start, decoder_week_start_ts, total
     enc_len = 168
     dec_len = max(total_len - enc_len, 0)
 
-    idx, inputs, col_map = load_model_inputs_from_csv(csv_path, xfmr, history_start, total_len)
+    idx, inputs, col_map = load_model_inputs_from_csv(csv_path, feeder, history_start, total_len)
 
     lines = []
-    lines.append(f"[INPUTS] {tag} | XFMR={xfmr} | sample={sample_index}")
+    lines.append(f"[INPUTS] {tag} | FEEDER={feeder} | sample={sample_index}")
     lines.append(f"[INPUTS] columns used -> {col_map}")
     lines.append(f"[INPUTS] encoder window: {idx[0]} -> {idx[min(enc_len, total_len) - 1]} ({min(enc_len, total_len)}h)")
     if dec_len > 0:
@@ -446,7 +449,7 @@ def plot_one_week(
     temp_unit: str,
     model_base: str,
     csv_path: str,
-    xfmr: int,
+    feeder: str,
     xlsx_tag: str,
     save_fig: bool = True,
     show_fig: bool = True,
@@ -480,11 +483,11 @@ def plot_one_week(
         x_steps = np.clip(x_steps, 0, total_len - 1)
         return full_time[x_steps]
 
-    temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
+    temp_time, temp_vals = load_temp_from_csv(csv_path, feeder, history_start, total_len)
 
     log_model_inputs(
         csv_path=csv_path,
-        xfmr=xfmr,
+        feeder=feeder,
         history_start=history_start,
         decoder_week_start_ts=decoder_week_start_ts,
         total_len=total_len,
@@ -520,7 +523,7 @@ def plot_one_week(
     ax.set_ylabel(f"Load ({load_unit})")
     ax.set_xlabel("Date")
     ax.set_title(
-        f"{tag} | XFMR={xfmr} | Week={pd.to_datetime(decoder_week_start_ts).date()} | sample={sample_index}\n"
+        f"{tag} | FEEDER={feeder} | Week={pd.to_datetime(decoder_week_start_ts).date()} | sample={sample_index}\n"
         f"XLSX={xlsx_tag} | model={model_base}"
     )
 
@@ -549,7 +552,7 @@ def plot_one_week(
         safe_tag = tag.replace(" ", "_")
         out_png = os.path.join(
             out_dir,
-            f"{xlsx_tag}__{safe_tag}__xfmr{xfmr}__week{week_str}__sample{sample_index}__base.png"
+            f"{xlsx_tag}__{safe_tag}__feeder{feeder}__week{week_str}__sample{sample_index}__base.png"
         )
         plt.savefig(out_png, dpi=200, bbox_inches="tight")
         print(f"[✓] Saved: {out_png}")
@@ -607,10 +610,10 @@ def main():
     print(f"[INFO] Output folder: {out_dir}")
 
     # Load CSV hourly + week map
-    hourly, week_start_map, temp_col, load_col = load_hourly_df(CSV_PATH, TARGET_XFMR)
+    hourly, week_start_map, temp_col, load_col = load_hourly_df(CSV_PATH, TARGET_FEEDER)
 
     summary = {
-        "xfmr": int(TARGET_XFMR),
+        "feeder": str(TARGET_FEEDER),
         "xlsx": os.path.basename(xlsx_path),
         "scaler_meta": os.path.basename(SCALER_META_JSON),
         "csv": os.path.basename(CSV_PATH),
@@ -648,7 +651,7 @@ def main():
             temp_unit=TEMP_UNIT,
             model_base=model_base,
             csv_path=CSV_PATH,
-            xfmr=TARGET_XFMR,
+            feeder=TARGET_FEEDER,
             xlsx_tag=xlsx_tag,
             save_fig=SAVE_FIG,
             show_fig=SHOW_FIG,
@@ -685,7 +688,7 @@ def main():
                 temp_unit=TEMP_UNIT,
                 model_base=model_base,
                 csv_path=CSV_PATH,
-                xfmr=TARGET_XFMR,
+                feeder=TARGET_FEEDER,
                 xlsx_tag=xlsx_tag,
                 save_fig=SAVE_FIG,
                 show_fig=SHOW_FIG,
@@ -735,7 +738,7 @@ def main():
                     temp_unit=TEMP_UNIT,
                     model_base=model_base,
                     csv_path=CSV_PATH,
-                    xfmr=TARGET_XFMR,
+                    feeder=TARGET_FEEDER,
                     xlsx_tag=xlsx_tag,
                     save_fig=SAVE_FIG,
                     show_fig=SHOW_FIG,
