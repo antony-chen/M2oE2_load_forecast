@@ -152,17 +152,7 @@ def extract_one_sample(df_xlsx: pd.DataFrame, sample_index: int, model_name: str
     x_p, y_p = get("pred_mean")
     x_s, y_s = get("pred_std")
 
-    # collect 24-hour forecast windows (pred_window_0, pred_window_24, ...)
-    windows = {}
-    for vtype in dm["value_type"].unique():
-        if str(vtype).startswith("pred_window_") and not str(vtype).startswith("pred_window_std_"):
-            dec_pos = int(str(vtype).split("_")[-1])
-            xw, yw = get(vtype)
-            xs, ys = get(f"pred_window_std_{dec_pos}")
-            windows[dec_pos] = {"x": xw, "mu": yw, "std": ys}
-
-    return {"x_h": x_h, "hist": y_h, "x_t": x_t, "true": y_t,
-            "x_p": x_p, "pred": y_p, "std": y_s, "windows": windows}
+    return {"x_h": x_h, "hist": y_h, "x_t": x_t, "true": y_t, "x_p": x_p, "pred": y_p, "std": y_s}
 
 
 def denorm_pack_load(pack, meta):
@@ -176,17 +166,6 @@ def denorm_pack_load(pack, meta):
     if len(pack["true"]) > 0: pack["true"] = denorm_minmax(pack["true"], load_min, load_max)
     if len(pack["pred"]) > 0: pack["pred"] = denorm_minmax(pack["pred"], load_min, load_max)
     if len(pack["std"])  > 0: pack["std"]  = pack["std"] * load_scale
-
-    # denormalize 24-hour forecast windows
-    denormed_windows = {}
-    for dec_pos, win in pack.get("windows", {}).items():
-        denormed_windows[dec_pos] = {
-            "x":   win["x"],
-            "mu":  denorm_minmax(win["mu"], load_min, load_max) if len(win["mu"]) > 0 else win["mu"],
-            "std": win["std"] * load_scale if len(win["std"]) > 0 else win["std"],
-        }
-    pack["windows"] = denormed_windows
-
     return pack
 
 
@@ -408,8 +387,6 @@ def plot_one_week(
 
     temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
 
-    WINDOW_COLOR = "blue"
-
     plt.figure(figsize=(12, 3.6))
     ax = plt.gca()
 
@@ -419,34 +396,20 @@ def plot_one_week(
     if len(base["x_t"]) > 0:
         ax.plot(to_dt(base["x_t"]), base["true"], linestyle="--", color="red", linewidth=1.5, label="True")
 
-    # 24-hour forecast windows (forecasted at t=0, t=24, t=48, ...)
-    windows = base.get("windows", {})
-    added_pred_label = False
-    added_band_label = False
-    for dec_pos in sorted(windows.keys()):
-        win = windows[dec_pos]
-        if len(win["x"]) == 0:
-            continue
-        x_win = to_dt(win["x"].astype(int))
-        y_win = win["mu"]
+    # Base pred
+    if len(base["x_p"]) > 0:
+        ax.plot(to_dt(base["x_p"]), base["pred"], color="blue", alpha=0.9, linewidth=1.5, label="Base (mean)")
+        if len(base["std"]) == len(base["pred"]) and len(base["std"]) > 0:
+            ax.fill_between(
+                to_dt(base["x_p"]),
+                base["pred"] - base["std"],
+                base["pred"] + base["std"],
+                color="blue", alpha=0.15, label="Base (±1σ)"
+            )
 
-        pred_label = "Forecast (mean)" if not added_pred_label else None
-        ax.plot(x_win, y_win, color=WINDOW_COLOR, linewidth=1.5, alpha=0.9, label=pred_label)
-        added_pred_label = True
-
-        if len(win["std"]) == len(y_win):
-            band_label = "±1σ" if not added_band_label else None
-            ax.fill_between(x_win, y_win - win["std"], y_win + win["std"],
-                            color=WINDOW_COLOR, alpha=0.15, label=band_label)
-            added_band_label = True
-
-        # vertical line at the start of each window (except the first)
-        if dec_pos > 0:
-            ax.axvline(x_win[0], color=WINDOW_COLOR, linestyle=":", linewidth=0.8, alpha=0.5)
-
-    # encoder/decoder split marker
+    # split marker
     if total_len > 168:
-        ax.axvline(full_time[167], color="grey", linestyle="--", alpha=0.5, label="Enc/Dec split")
+        ax.axvline(full_time[167], color="grey", linestyle="--", alpha=0.5)
 
     ax.set_ylabel(f"Load ({load_unit})")
     ax.set_xlabel("Date")

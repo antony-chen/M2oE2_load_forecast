@@ -896,28 +896,7 @@ def evaluate_model(
                 df_true = pd.DataFrame({'time_step': x_fore, 'value': y_true_i.numpy(), 'value_type': 'true'})
                 df_pred = pd.DataFrame({'time_step': x_fore, 'value': mu_i.numpy(), 'value_type': 'pred_mean'})
                 df_std = pd.DataFrame({'time_step': x_fore, 'value': std_i.numpy(), 'value_type': 'pred_std'})
-
-                # 24-hour forecast windows: full output_len prediction from positions 0, 24, 48, ...
-                output_len_i = mu_preds.shape[2]
-                window_frames = []
-                for dec_pos in range(0, H, 24):
-                    if dec_pos >= mu_preds.shape[1]:
-                        break
-                    win_mu  = mu_preds[i, dec_pos, :].detach().cpu().numpy()
-                    win_std = logvar_preds[i, dec_pos, :].exp().sqrt().detach().cpu().numpy()
-                    x_win   = np.arange(Lh + dec_pos, Lh + dec_pos + output_len_i)
-                    window_frames.append(pd.DataFrame({
-                        'time_step': x_win,
-                        'value': win_mu,
-                        'value_type': f'pred_window_{dec_pos}',
-                    }))
-                    window_frames.append(pd.DataFrame({
-                        'time_step': x_win,
-                        'value': win_std,
-                        'value_type': f'pred_window_std_{dec_pos}',
-                    }))
-
-                df_sample = pd.concat([df_hist, df_true, df_pred, df_std] + window_frames, ignore_index=True)
+                df_sample = pd.concat([df_hist, df_true, df_pred, df_std], ignore_index=True)
                 df_sample['model_name'] = model_name
                 df_sample['sample_index'] = i + batch_id * test_loader.batch_size
                 data_export_list.append(df_sample)
