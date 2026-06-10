@@ -55,6 +55,10 @@ SHOW_FIG = True
 LOAD_UNIT = "kW"
 TEMP_UNIT = "°F"
 
+# ---- thermal response (must match main_M2oE2_Final) ----
+COOL_BASE_F = 72.0
+HEAT_BASE_F = 60.0
+
 # ---- shock selection params ----
 Q = 0.95
 TOP_N_SEARCH = 10
@@ -327,6 +331,97 @@ def load_temp_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp, periods
     return idx, out.to_numpy()
 
 
+def load_model_inputs_from_csv(csv_path: str, xfmr: int, start_ts: pd.Timestamp, periods: int):
+    """
+    Reload the raw weather inputs that feed the model's three "experts":
+      - thermal expert: temperature (+ derived CDD/HDD)
+      - workday slot:   relative humidity
+      - season slot:    heat index
+    Returns a dict of {name: np.ndarray}, aligned hour-by-hour to `start_ts`.
+    Missing columns are simply omitted from the dict.
+    """
+    df = pd.read_csv(csv_path)
+    df = df[df["XFMR"] == xfmr].copy()
+    if df.empty:
+        raise ValueError(f"No rows for XFMR={xfmr} in {csv_path}")
+
+    df["DATE1"] = pd.to_datetime(df["DATE1"])
+    df["ts"] = df["DATE1"] + pd.to_timedelta(df["HOUR1"].astype(int), unit="h")
+
+    col_map = {
+        "load":     _guess_col(df, ("KWH", "LOAD", "Load", "LOAD_KW", "LOAD_AVG", "KW", "kW")),
+        "temp":     _guess_col(df, ("SURDPOINTTEMPFAHRENHEIT", "TEMPERATURE", "TEMP", "Temperature")),
+        "humidity": _guess_col(df, ("RELATIVEHUMIDITY", "HUMIDITY", "Humidity", "RelativeHumidity")),
+        "heatindex": _guess_col(df, ("HEATINDEXFAHRENHEIT", "HEATINDEX", "HeatIndex", "HEAT_INDEX")),
+    }
+
+    idx = pd.date_range(start=start_ts, periods=periods, freq="h")
+    out = {}
+    for name, col in col_map.items():
+        if col is None:
+            continue
+        series = df.groupby("ts", as_index=True)[col].mean().sort_index()
+        out[name] = series.reindex(idx).ffill().bfill().to_numpy()
+
+    if "temp" in out:
+        out["cdd"] = np.maximum(out["temp"] - COOL_BASE_F, 0.0)
+        out["hdd"] = np.maximum(HEAT_BASE_F - out["temp"], 0.0)
+
+    return idx, out, col_map
+
+
+def log_model_inputs(csv_path, xfmr, history_start, decoder_week_start_ts, total_len, sample_index, tag, out_dir=None):
+    """
+    Print (and optionally save) a summary of the actual encoder/decoder inputs
+    used to produce a given forecast, so the chart can be cross-checked against
+    the data fed into the model.
+    """
+    enc_len = 168
+    dec_len = max(total_len - enc_len, 0)
+
+    idx, inputs, col_map = load_model_inputs_from_csv(csv_path, xfmr, history_start, total_len)
+
+    lines = []
+    lines.append(f"[INPUTS] {tag} | XFMR={xfmr} | sample={sample_index}")
+    lines.append(f"[INPUTS] columns used -> {col_map}")
+    lines.append(f"[INPUTS] encoder window: {idx[0]} -> {idx[min(enc_len, total_len) - 1]} ({min(enc_len, total_len)}h)")
+    if dec_len > 0:
+        lines.append(f"[INPUTS] decoder window: {idx[enc_len]} -> {idx[total_len - 1]} ({dec_len}h)")
+
+    for name, vals in inputs.items():
+        enc_vals = vals[:enc_len]
+        dec_vals = vals[enc_len:total_len]
+        if len(enc_vals) > 0:
+            lines.append(
+                f"[INPUTS]   {name:>10s} (encoder): "
+                f"min={enc_vals.min():.2f} max={enc_vals.max():.2f} mean={enc_vals.mean():.2f}"
+            )
+        if len(dec_vals) > 0:
+            lines.append(
+                f"[INPUTS]   {name:>10s} (decoder, oracle/future): "
+                f"min={dec_vals.min():.2f} max={dec_vals.max():.2f} mean={dec_vals.mean():.2f}"
+            )
+
+    if "humidity" in inputs:
+        lines.append("[INPUTS]   note: 'humidity' feeds the model's WORKDAY-slot expert")
+    if "heatindex" in inputs:
+        lines.append("[INPUTS]   note: 'heatindex' feeds the model's SEASON-slot expert")
+    if "temp" in inputs:
+        lines.append("[INPUTS]   note: 'temp'/'cdd'/'hdd' + decoder-window temp feed the THERMAL expert")
+
+    log_text = "\n".join(lines)
+    print(log_text)
+
+    if out_dir is not None:
+        safe_tag = tag.replace(" ", "_")
+        log_path = os.path.join(out_dir, f"{safe_tag}__sample{sample_index}__inputs.txt")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(log_text + "\n")
+        print(f"[✓] Saved input log: {log_path}")
+
+    return inputs
+
+
 def make_unique_outdir(base_dir: str, xlsx_path: str):
     """
     Create a unique output folder to avoid overwriting.
@@ -386,6 +481,17 @@ def plot_one_week(
         return full_time[x_steps]
 
     temp_time, temp_vals = load_temp_from_csv(csv_path, xfmr, history_start, total_len)
+
+    log_model_inputs(
+        csv_path=csv_path,
+        xfmr=xfmr,
+        history_start=history_start,
+        decoder_week_start_ts=decoder_week_start_ts,
+        total_len=total_len,
+        sample_index=sample_index,
+        tag=tag,
+        out_dir=out_dir if save_fig else None,
+    )
 
     plt.figure(figsize=(12, 3.6))
     ax = plt.gca()
