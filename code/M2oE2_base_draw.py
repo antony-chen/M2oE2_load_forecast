@@ -59,6 +59,77 @@ TEMP_UNIT = "°F"
 COOL_BASE_F = 72.0
 HEAT_BASE_F = 60.0
 
+
+# =========================
+# Standalone utility: annual load plot
+# =========================
+def plot_annual_load(df, feeder, load_col, year=None, title=None, figsize=(16, 4),
+                     save_path=None, show=True):
+    """
+    Plot hourly load for one feeder over a full year.
+
+    Parameters
+    ----------
+    df        : pd.DataFrame with columns "TIME" (parseable datetime), "FEEDER" (str), and `load_col`.
+    feeder    : str — feeder name to filter on.
+    load_col  : str — name of the column containing load values.
+    year      : int or None — if given, filter to that calendar year; otherwise plot all data.
+    title     : str or None — custom title; auto-generated if None.
+    figsize   : tuple — matplotlib figure size.
+    save_path : str or None — if given, save the figure to this path.
+    show      : bool — whether to call plt.show().
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    d = df.copy()
+    d["FEEDER"] = d["FEEDER"].astype(str).str.strip()
+    d = d[d["FEEDER"] == str(feeder)].copy()
+    if d.empty:
+        raise ValueError(f"No rows for FEEDER='{feeder}'. Available: {df['FEEDER'].unique().tolist()[:10]}")
+
+    d["TIME"] = pd.to_datetime(d["TIME"])
+    if load_col not in d.columns:
+        raise KeyError(f"Column '{load_col}' not found. Available: {d.columns.tolist()}")
+
+    if year is not None:
+        d = d[d["TIME"].dt.year == int(year)]
+        if d.empty:
+            raise ValueError(f"No data for FEEDER='{feeder}' in year {year}.")
+
+    d = d.sort_values("TIME")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(d["TIME"], d[load_col], linewidth=0.6, color="steelblue")
+    ax.set_ylabel(load_col)
+    ax.set_xlabel("Date")
+
+    if title is None:
+        yr_label = str(year) if year else f"{d['TIME'].dt.year.min()}–{d['TIME'].dt.year.max()}"
+        title = f"Feeder {feeder} — {load_col} ({yr_label})"
+    ax.set_title(title)
+
+    peak_val = d[load_col].max()
+    peak_time = d.loc[d[load_col].idxmax(), "TIME"]
+    ax.axhline(peak_val, color="red", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.annotate(f"Peak: {peak_val:.1f} @ {peak_time:%m/%d %H:%M}",
+                xy=(peak_time, peak_val), fontsize=8, color="red",
+                xytext=(10, 5), textcoords="offset points")
+
+    fig.autofmt_xdate()
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        print(f"[✓] Saved: {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+    return fig
+
 # ---- shock selection params ----
 Q = 0.95
 TOP_N_SEARCH = 10
