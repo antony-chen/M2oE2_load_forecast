@@ -63,17 +63,19 @@ HEAT_BASE_F = 60.0
 # =========================
 # Standalone utility: annual load plot
 # =========================
-def plot_annual_load(df, feeder, load_col, year=None, title=None, figsize=(16, 4),
-                     save_path=None, show=True):
+def plot_annual_load(df, feeder, load_col, year=None, start=None, end=None,
+                     title=None, figsize=(16, 4), save_path=None, show=True):
     """
-    Plot hourly load for one feeder over a full year.
+    Plot hourly load for one feeder over a time range.
 
     Parameters
     ----------
     df        : pd.DataFrame with columns "TIME" (parseable datetime), "FEEDER" (str), and `load_col`.
     feeder    : str — feeder name to filter on.
     load_col  : str — name of the column containing load values.
-    year      : int or None — if given, filter to that calendar year; otherwise plot all data.
+    year      : int or None — filter to a calendar year (ignored if start/end are given).
+    start     : str/datetime or None — inclusive start of the time window (e.g. "2025-06-01").
+    end       : str/datetime or None — inclusive end of the time window (e.g. "2025-09-01").
     title     : str or None — custom title; auto-generated if None.
     figsize   : tuple — matplotlib figure size.
     save_path : str or None — if given, save the figure to this path.
@@ -93,10 +95,16 @@ def plot_annual_load(df, feeder, load_col, year=None, title=None, figsize=(16, 4
     if load_col not in d.columns:
         raise KeyError(f"Column '{load_col}' not found. Available: {d.columns.tolist()}")
 
-    if year is not None:
+    if start is not None or end is not None:
+        if start is not None:
+            d = d[d["TIME"] >= pd.to_datetime(start)]
+        if end is not None:
+            d = d[d["TIME"] <= pd.to_datetime(end)]
+    elif year is not None:
         d = d[d["TIME"].dt.year == int(year)]
-        if d.empty:
-            raise ValueError(f"No data for FEEDER='{feeder}' in year {year}.")
+
+    if d.empty:
+        raise ValueError(f"No data for FEEDER='{feeder}' in the specified time range.")
 
     d = d.sort_values("TIME")
 
@@ -106,8 +114,14 @@ def plot_annual_load(df, feeder, load_col, year=None, title=None, figsize=(16, 4
     ax.set_xlabel("Date")
 
     if title is None:
-        yr_label = str(year) if year else f"{d['TIME'].dt.year.min()}–{d['TIME'].dt.year.max()}"
-        title = f"Feeder {feeder} — {load_col} ({yr_label})"
+        t_min, t_max = d["TIME"].min(), d["TIME"].max()
+        if start is not None or end is not None:
+            range_label = f"{t_min:%Y-%m-%d} to {t_max:%Y-%m-%d}"
+        elif year is not None:
+            range_label = str(year)
+        else:
+            range_label = f"{t_min.year}–{t_max.year}"
+        title = f"Feeder {feeder} — {load_col} ({range_label})"
     ax.set_title(title)
 
     peak_val = d[load_col].max()
