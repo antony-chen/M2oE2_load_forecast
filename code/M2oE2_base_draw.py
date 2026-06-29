@@ -536,6 +536,65 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
     print(f"{'=' * width}\n")
 
 
+def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h.png"):
+    """Render the forecast table as a color-coded PNG."""
+    import matplotlib.colors as mcolors
+
+    n = len(pred_np)
+    diff = pred_np - true_np
+    pct_err = np.abs(diff) / (np.abs(true_np) + 1e-12) * 100.0
+    mae = np.mean(np.abs(diff))
+    mape = np.mean(pct_err)
+
+    cmap = plt.cm.RdYlGn_r
+    norm = mcolors.Normalize(vmin=0, vmax=30)
+
+    col_labels = ["Timestamp", "Predicted", "Actual", "Diff", "Error %"]
+    cell_text = []
+    cell_colors = []
+    for h in range(n):
+        row = [ts_labels[h], f"{pred_np[h]:.2f}", f"{true_np[h]:.2f}",
+               f"{diff[h]:+.2f}", f"{pct_err[h]:.1f}%"]
+        cell_text.append(row)
+        c = cmap(norm(min(pct_err[h], 30)))
+        cell_colors.append(["white", "white", "white", c, c])
+
+    cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
+    cell_colors.append(["#D9E2F3"] * 5)
+
+    fig_h = max(4, 0.32 * (n + 2))
+    fig, ax = plt.subplots(figsize=(10, fig_h))
+    ax.axis("off")
+    ax.set_title("48-Hour Load Forecast", fontsize=14, fontweight="bold", pad=12)
+
+    table = ax.table(cellText=cell_text, colLabels=col_labels,
+                     cellColours=cell_colors, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.2)
+
+    for j in range(len(col_labels)):
+        cell = table[0, j]
+        cell.set_facecolor("#4472C4")
+        cell.set_text_props(color="white", fontweight="bold")
+
+    for h in range(n):
+        c = cmap(norm(min(pct_err[h], 30)))
+        lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+        txt_color = "white" if lum < 0.45 else "black"
+        table[h + 1, 3].set_text_props(color=txt_color)
+        table[h + 1, 4].set_text_props(color=txt_color)
+
+    summary_row = n + 1
+    for j in range(len(col_labels)):
+        table[summary_row, j].set_text_props(fontweight="bold")
+
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"[+] Forecast table PNG saved to {save_path}")
+
+
 # =========================
 # Main
 # =========================
@@ -573,6 +632,19 @@ def main():
             dec_start_ts = pd.to_datetime(hit.iloc[0]["week_start_ts"]) if not hit.empty else None
             print(f"\n[INFO] Printing 48-hour forecast table for last test sample (sample_index={last_sid})")
             print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT, start_ts=dec_start_ts)
+
+            pred_arr = last_pack.get("pred", np.array([]))
+            true_arr = last_pack.get("true", np.array([]))
+            n_hrs = min(48, len(pred_arr))
+            if len(true_arr) >= n_hrs and n_hrs > 0:
+                if dec_start_ts is not None:
+                    ts_range = pd.date_range(start=dec_start_ts, periods=n_hrs, freq="h")
+                    ts_labels = [t.strftime("%Y-%m-%d %H:%M") for t in ts_range]
+                else:
+                    ts_labels = [str(h) for h in range(n_hrs)]
+                png_path = os.path.join(out_dir, f"forecast_48h_sample{last_sid}.png")
+                save_forecast_table_png(pred_arr[:n_hrs], true_arr[:n_hrs], ts_labels,
+                                        save_path=png_path)
         else:
             print(f"[WARN] Could not extract sample {last_sid} for forecast table.")
     else:

@@ -148,6 +148,66 @@ def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timesta
 
     print(f"{'=' * width}\n")
 
+
+def save_forecast_table_png(mu_np, tgt_np, ts_labels, save_path="forecast_48h.png"):
+    """Render the forecast table as a color-coded PNG."""
+    import matplotlib.colors as mcolors
+
+    n = len(mu_np)
+    diff = mu_np - tgt_np
+    pct_err = np.abs(diff) / (np.abs(tgt_np) + 1e-12) * 100.0
+    mae = np.mean(np.abs(diff))
+    mape = np.mean(pct_err)
+
+    cmap = plt.cm.RdYlGn_r
+    norm = mcolors.Normalize(vmin=0, vmax=30)
+
+    col_labels = ["Timestamp", "Predicted", "Actual", "Diff", "Error %"]
+    cell_text = []
+    cell_colors = []
+    for h in range(n):
+        row = [ts_labels[h], f"{mu_np[h]:.2f}", f"{tgt_np[h]:.2f}",
+               f"{diff[h]:+.2f}", f"{pct_err[h]:.1f}%"]
+        cell_text.append(row)
+        c = cmap(norm(min(pct_err[h], 30)))
+        cell_colors.append(["white", "white", "white", c, c])
+
+    cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
+    cell_colors.append(["#D9E2F3"] * 5)
+
+    fig_h = max(4, 0.32 * (n + 2))
+    fig, ax = plt.subplots(figsize=(10, fig_h))
+    ax.axis("off")
+    ax.set_title("48-Hour Load Forecast", fontsize=14, fontweight="bold", pad=12)
+
+    table = ax.table(cellText=cell_text, colLabels=col_labels,
+                     cellColours=cell_colors, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.2)
+
+    for j in range(len(col_labels)):
+        cell = table[0, j]
+        cell.set_facecolor("#4472C4")
+        cell.set_text_props(color="white", fontweight="bold")
+
+    for h in range(n):
+        c = cmap(norm(min(pct_err[h], 30)))
+        lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+        txt_color = "white" if lum < 0.45 else "black"
+        table[h + 1, 3].set_text_props(color=txt_color)
+        table[h + 1, 4].set_text_props(color=txt_color)
+
+    summary_row = n + 1
+    for j in range(len(col_labels)):
+        table[summary_row, j].set_text_props(fontweight="bold")
+
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"[+] Forecast table PNG saved to {save_path}")
+
+
 def process_seq2seq_data(
         feature_dict, *, train_ratio=0.7, norm_features=('load', 'temp'), output_len=24,
         encoder_len_weeks=1, decoder_len_weeks=1, num_in_week=168, device=None):
@@ -488,6 +548,20 @@ def evaluate_model(model, test_loader, loss_fn, device,
         print_forecast_table(last_mu, target_seq=last_target,
                              scaler=load_scaler, hours=forecast_hours,
                              timestamps=forecast_timestamps)
+
+        if last_target is not None:
+            n = min(forecast_hours, len(last_mu))
+            mu_np = last_mu[:n].cpu().numpy().copy()
+            tgt_np = last_target[:n].cpu().numpy().copy()
+            if load_scaler is not None:
+                mu_np = load_scaler.inverse_transform(mu_np.reshape(-1, 1)).flatten()
+                tgt_np = load_scaler.inverse_transform(tgt_np.reshape(-1, 1)).flatten()
+            has_ts = forecast_timestamps is not None and len(forecast_timestamps) >= n
+            ts_labels = [pd.to_datetime(forecast_timestamps[h]).strftime("%Y-%m-%d %H:%M")
+                         if has_ts else str(h) for h in range(n)]
+            mn = model_name if model_name else "model"
+            save_forecast_table_png(mu_np, tgt_np, ts_labels,
+                                    save_path=f"./result/{mn}_forecast_48h.png")
 
     return test_mse, test_nll, test_crps, test_qpin, test_wink
 
