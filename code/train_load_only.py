@@ -407,7 +407,7 @@ def build_seq2seq_tensors(feat_1d, expert_map, encoder_weeks, decoder_weeks,
         targets = np.stack([dec_full[i:i+output_len] for i in range(L+1)], axis=0)
 
         X_enc_l.append(enc_l);   X_enc_ext.append(enc_ext)
-        X_dec_l.append(dec_full[:L]); X_dec_ext.append(dec_ext)
+        X_dec_l.append(np.zeros(L, dtype=np.float32)); X_dec_ext.append(dec_ext)
         Y_target.append(targets)
 
     def to_t(a):
