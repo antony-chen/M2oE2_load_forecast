@@ -286,9 +286,16 @@ class Decoder_meta(nn.Module):
         assert hidden_size is not None, "You must provide hidden_size for projection."
         self.project = nn.ModuleList([nn.Linear(hidden_size, latent_size) for _ in range(num_layers)])
 
-    def forward(self, x_l_seq, x_ext_seq, h_init, transform_block,
+    def forward(self, x_ext_seq, h_init, transform_block,
                 epoch=None, top_k=None, warmup_epochs=0):
-        B, L, _ = x_l_seq.shape
+        """
+        Autoregressive decoder: does not use current-week load as input.
+        Uses its own predictions as the load signal for the MetaTransformBlock.
+
+        x_ext_seq: [B, L, K_ext]
+        """
+        B = h_init.shape[1]
+        L = x_ext_seq.shape[1]
 
         h_rnn = torch.stack([self.project[i](h_init[i]) for i in range(self.num_layers)], dim=0)
 
@@ -298,11 +305,13 @@ class Decoder_meta(nn.Module):
         pred_0 = self.head(h_last).view(B, self.output_len, self.output_dim)
         preds.append(pred_0.unsqueeze(1))
 
+        ar_load = pred_0[:, 0, :]  # [B, output_dim]
+
         for t in range(L):
             h_for_meta = h_rnn[-1]
             x_prime, _ = transform_block(
                 h_for_meta,
-                x_l_seq[:, t],
+                ar_load,
                 x_ext_seq[:, t] if x_ext_seq.size(-1) > 0 else x_ext_seq[:, t:t + 1],
                 epoch=epoch,
                 top_k=top_k,
@@ -312,6 +321,8 @@ class Decoder_meta(nn.Module):
             out_t, h_rnn = self.rnn(x_prime, h_rnn)
             pred_t = self.head(out_t.squeeze(1)).view(B, self.output_len, self.output_dim)
             preds.append(pred_t.unsqueeze(1))
+
+            ar_load = pred_t[:, 0, :]  # [B, output_dim]
 
         preds = torch.cat(preds, dim=1)
         return preds
@@ -379,7 +390,7 @@ class Seq2Seq_meta(nn.Module):
             epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs
         )
         preds = self.decoder(
-            dec_l, dec_ext,
+            dec_ext,
             h_init=h_enc,
             transform_block=self.transform_dec,
             epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs
@@ -454,9 +465,16 @@ class VariationalDecoder_meta_predvar(nn.Module):
         self.head_mu = nn.Linear(latent_size, output_len * output_dim)
         self.head_logvar = nn.Linear(latent_size, output_len * output_dim)
 
-    def forward(self, x_l_seq, x_ext_seq, z_latent, transform_block,
+    def forward(self, x_ext_seq, z_latent, transform_block,
                 epoch=None, top_k=None, warmup_epochs=0):
-        B, L, _ = x_l_seq.shape
+        """
+        Autoregressive decoder: does not use current-week load as input.
+        Uses its own mean predictions as the load signal for the MetaTransformBlock.
+
+        x_ext_seq: [B, L, K_ext]
+        """
+        B = z_latent.shape[0]
+        L = x_ext_seq.shape[1]
         h_rnn = z_latent.unsqueeze(0).repeat(self.num_layers, 1, 1)
 
         mu_preds = []
@@ -468,11 +486,13 @@ class VariationalDecoder_meta_predvar(nn.Module):
         mu_preds.append(mu_0.unsqueeze(1))
         logvar_preds.append(logvar_0.unsqueeze(1))
 
+        ar_load = mu_0[:, 0, :]  # [B, output_dim]
+
         for t in range(L):
             h_for_meta = h_rnn[-1]
             x_prime, _ = transform_block(
                 h_for_meta,
-                x_l_seq[:, t],
+                ar_load,
                 x_ext_seq[:, t] if x_ext_seq.size(-1) > 0 else x_ext_seq[:, t:t + 1],
                 epoch=epoch,
                 top_k=top_k,
@@ -486,6 +506,8 @@ class VariationalDecoder_meta_predvar(nn.Module):
 
             mu_preds.append(mu_t.unsqueeze(1))
             logvar_preds.append(logvar_t.unsqueeze(1))
+
+            ar_load = mu_t[:, 0, :]  # [B, output_dim]
 
         mu_preds = torch.cat(mu_preds, dim=1)
         logvar_preds = torch.cat(logvar_preds, dim=1)
@@ -560,7 +582,7 @@ class VariationalSeq2Seq_meta(nn.Module):
         )
         z = self.reparameterize(mu, logvar)
         mu_preds, logvar_preds = self.decoder(
-            dec_l, dec_ext,
+            dec_ext,
             z_latent=z,
             transform_block=self.transform_dec,
             epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs

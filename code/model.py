@@ -113,7 +113,12 @@ class Decoder_meta(nn.Module):
     def forward(self, x_l_seq, x_t_seq, x_w_seq, x_s_seq,
                 h_init, transform_block,
                 epoch=None, top_k=None, warmup_epochs=0):
-        B, L, _ = x_l_seq.shape
+        """
+        Autoregressive decoder: does not use current-week load (x_l_seq) as input.
+        Uses its own predictions as the load signal for the MetaTransformBlock.
+        x_l_seq is accepted for API compatibility but only used to determine L.
+        """
+        B, L, _ = x_t_seq.shape
 
         # Project each layer of encoder hidden state to latent size
         h_rnn = torch.stack([
@@ -127,17 +132,22 @@ class Decoder_meta(nn.Module):
         pred_0 = self.head(h_last).view(B, self.output_len, self.output_dim)
         preds.append(pred_0.unsqueeze(1))  # [B, 1, output_len, output_dim]
 
+        # Autoregressive load input: first predicted value from Step 0
+        ar_load = pred_0[:, 0, :]  # [B, output_dim]
+
         # Steps 1 to L
         for t in range(L):
             h_for_meta = h_rnn[-1]
             x_prime, _ = transform_block(h_for_meta,
-                                         x_l_seq[:, t], x_t_seq[:, t],
+                                         ar_load, x_t_seq[:, t],
                                          x_w_seq[:, t], x_s_seq[:, t],
                                          epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs)
             x_prime = x_prime.unsqueeze(1)
             out_t, h_rnn = self.rnn(x_prime, h_rnn)
             pred_t = self.head(out_t.squeeze(1)).view(B, self.output_len, self.output_dim)
             preds.append(pred_t.unsqueeze(1))
+
+            ar_load = pred_t[:, 0, :]  # [B, output_dim]
 
         preds = torch.cat(preds, dim=1)  # [B, L+1, output_len, output_dim]
         return preds
@@ -188,7 +198,7 @@ class Seq2Seq_meta(nn.Module):
                              transform_block=self.transform_enc,
                              epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs)
 
-        preds = self.decoder(dec_l, dec_t, dec_w, dec_s,
+        preds = self.decoder(None, dec_t, dec_w, dec_s,
                              h_init=h_enc,
                              transform_block=self.transform_dec,
                              epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs)
@@ -254,7 +264,12 @@ class VariationalDecoder_meta_predvar(nn.Module):
     def forward(self, x_l_seq, x_t_seq, x_w_seq, x_s_seq,
                 z_latent, transform_block,
                 epoch=None, top_k=None, warmup_epochs=0):
-        B, L, _ = x_l_seq.shape
+        """
+        Autoregressive decoder: does not use current-week load (x_l_seq) as input.
+        Uses its own mean predictions as the load signal for the MetaTransformBlock.
+        x_l_seq is accepted for API compatibility but only used to determine L.
+        """
+        B, L, _ = x_t_seq.shape
 
         h_rnn = z_latent.unsqueeze(0).repeat(self.num_layers, 1, 1)  # [num_layers, B, latent_size]
 
@@ -268,11 +283,14 @@ class VariationalDecoder_meta_predvar(nn.Module):
         mu_preds.append(mu_0.unsqueeze(1))           # [B, 1, output_len, output_dim]
         logvar_preds.append(logvar_0.unsqueeze(1))   # same shape
 
+        # Autoregressive load input: first predicted value from Step 0
+        ar_load = mu_0[:, 0, :]  # [B, output_dim]
+
         # Steps 1 to L
         for t in range(L):
             h_for_meta = h_rnn[-1]
             x_prime, _ = transform_block(h_for_meta,
-                                         x_l_seq[:, t], x_t_seq[:, t],
+                                         ar_load, x_t_seq[:, t],
                                          x_w_seq[:, t], x_s_seq[:, t],
                                          epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs)
             x_prime = x_prime.unsqueeze(1)
@@ -283,6 +301,8 @@ class VariationalDecoder_meta_predvar(nn.Module):
 
             mu_preds.append(mu_t.unsqueeze(1))
             logvar_preds.append(logvar_t.unsqueeze(1))
+
+            ar_load = mu_t[:, 0, :]  # [B, output_dim]
 
         # Stack across time
         mu_preds = torch.cat(mu_preds, dim=1)         # [B, L+1, output_len, output_dim]
@@ -353,7 +373,7 @@ class VariationalSeq2Seq_meta(nn.Module):
 
         z = self.reparameterize(mu, logvar)  # [B, latent_size]
 
-        mu_preds, logvar_preds = self.decoder(dec_l, dec_t, dec_w, dec_s,
+        mu_preds, logvar_preds = self.decoder(None, dec_t, dec_w, dec_s,
                              z_latent=z,
                              transform_block=self.transform_dec,
                              epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs)
