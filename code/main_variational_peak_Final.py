@@ -97,7 +97,8 @@ def make_loader(split_dict, batch_size, shuffle):
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
 
-def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timestamps=None, **_ignored):
+def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timestamps=None,
+                         device_name=None, **_ignored):
     """Print a tabular forecast for the next `hours` hours to the console."""
     n = min(hours, len(mu_seq))
     mu_np = mu_seq[:n].cpu().numpy().copy()
@@ -115,18 +116,26 @@ def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timesta
     if has_ts:
         ts_arr = pd.to_datetime(timestamps[:n])
 
+    title_parts = []
+    if device_name:
+        title_parts.append(device_name)
+    title_parts.append(f"{n}-Hour Forecast")
+    if has_ts:
+        title_parts.append(f"{ts_arr[0].strftime('%Y-%m-%d %H:%M')} - {ts_arr[-1].strftime('%Y-%m-%d %H:%M')}")
+    title = " | ".join(title_parts)
+
     ts_col = "Timestamp" if has_ts else "Hour"
     ts_w = 20 if has_ts else 6
     if has_target:
-        width = ts_w + 56
+        width = max(ts_w + 56, len(title) + 4)
         print(f"\n{'=' * width}")
-        print(f"  Forecast: Next {n} Hours (last test sample)")
+        print(f"  {title}")
         print(f"{'=' * width}")
         print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}  {'Actual':>12s}  {'Diff':>12s}  {'Error %':>10s}")
     else:
-        width = ts_w + 16
+        width = max(ts_w + 16, len(title) + 4)
         print(f"\n{'=' * width}")
-        print(f"  Forecast: Next {n} Hours (last test sample)")
+        print(f"  {title}")
         print(f"{'=' * width}")
         print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}")
     print(f"{'-' * width}")
@@ -149,7 +158,8 @@ def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timesta
     print(f"{'=' * width}\n")
 
 
-def save_forecast_table_png(mu_np, tgt_np, ts_labels, save_path="forecast_48h.png"):
+def save_forecast_table_png(mu_np, tgt_np, ts_labels, save_path="forecast_48h.png",
+                            title=None):
     """Render the forecast table as a color-coded PNG."""
     import matplotlib.colors as mcolors
 
@@ -175,10 +185,13 @@ def save_forecast_table_png(mu_np, tgt_np, ts_labels, save_path="forecast_48h.pn
     cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
     cell_colors.append(["#D9E2F3"] * 5)
 
+    if title is None:
+        title = f"{n}-Hour Load Forecast"
+
     fig_h = max(4, 0.32 * (n + 2))
     fig, ax = plt.subplots(figsize=(10, fig_h))
     ax.axis("off")
-    ax.set_title("48-Hour Load Forecast", fontsize=14, fontweight="bold", pad=12)
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
 
     table = ax.table(cellText=cell_text, colLabels=col_labels,
                      cellColours=cell_colors, loc="center", cellLoc="center")
@@ -204,6 +217,7 @@ def save_forecast_table_png(mu_np, tgt_np, ts_labels, save_path="forecast_48h.pn
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.show()
     plt.close()
     print(f"[+] Forecast table PNG saved to {save_path}")
 
@@ -547,7 +561,8 @@ def evaluate_model(model, test_loader, loss_fn, device,
         last_target = all_targets[-1] if all_targets else None
         print_forecast_table(last_mu, target_seq=last_target,
                              scaler=load_scaler, hours=forecast_hours,
-                             timestamps=forecast_timestamps)
+                             timestamps=forecast_timestamps,
+                             device_name=data_name)
 
         if last_target is not None:
             n = min(forecast_hours, len(last_mu))
@@ -559,9 +574,17 @@ def evaluate_model(model, test_loader, loss_fn, device,
             has_ts = forecast_timestamps is not None and len(forecast_timestamps) >= n
             ts_labels = [pd.to_datetime(forecast_timestamps[h]).strftime("%Y-%m-%d %H:%M")
                          if has_ts else str(h) for h in range(n)]
+            title_parts = []
+            if data_name:
+                title_parts.append(data_name)
+            title_parts.append(f"{n}-Hour Load Forecast")
+            if has_ts and len(ts_labels) > 0:
+                title_parts.append(f"{ts_labels[0]} - {ts_labels[-1]}")
+            png_title = " | ".join(title_parts)
             mn = model_name if model_name else "model"
             save_forecast_table_png(mu_np, tgt_np, ts_labels,
-                                    save_path=f"./result/{mn}_forecast_48h.png")
+                                    save_path=f"./result/{mn}_forecast_48h.png",
+                                    title=png_title)
 
     return test_mse, test_nll, test_crps, test_qpin, test_wink
 

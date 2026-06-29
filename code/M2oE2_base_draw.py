@@ -483,7 +483,8 @@ def pick_first_valid_candidate_week(
 # =========================
 # 48-hour forecast table
 # =========================
-def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
+def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None,
+                         device_name=None):
     """Print a tabular forecast for the next `hours` hours from a denormalized sample pack."""
     pred = pack.get("pred", np.array([]))
     true = pack.get("true", np.array([]))
@@ -499,18 +500,26 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
     if has_ts:
         ts_arr = pd.date_range(start=start_ts, periods=n, freq="h")
 
+    title_parts = []
+    if device_name:
+        title_parts.append(device_name)
+    title_parts.append(f"{n}-Hour Forecast ({load_unit})")
+    if has_ts:
+        title_parts.append(f"{ts_arr[0].strftime('%Y-%m-%d %H:%M')} - {ts_arr[-1].strftime('%Y-%m-%d %H:%M')}")
+    title = " | ".join(title_parts)
+
     ts_col = "Timestamp" if has_ts else "Hour"
     ts_w = 20 if has_ts else 6
     if has_true:
-        width = ts_w + 56
+        width = max(ts_w + 56, len(title) + 4)
         print(f"\n{'=' * width}")
-        print(f"  Forecast: Next {n} Hours ({load_unit})")
+        print(f"  {title}")
         print(f"{'=' * width}")
         print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}  {'Actual':>12s}  {'Diff':>12s}  {'Error %':>10s}")
     else:
-        width = ts_w + 16
+        width = max(ts_w + 16, len(title) + 4)
         print(f"\n{'=' * width}")
-        print(f"  Forecast: Next {n} Hours ({load_unit})")
+        print(f"  {title}")
         print(f"{'=' * width}")
         print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}")
     print(f"{'-' * width}")
@@ -536,7 +545,8 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
     print(f"{'=' * width}\n")
 
 
-def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h.png"):
+def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h.png",
+                            title=None):
     """Render the forecast table as a color-coded PNG."""
     import matplotlib.colors as mcolors
 
@@ -562,10 +572,13 @@ def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h
     cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
     cell_colors.append(["#D9E2F3"] * 5)
 
+    if title is None:
+        title = f"{n}-Hour Load Forecast"
+
     fig_h = max(4, 0.32 * (n + 2))
     fig, ax = plt.subplots(figsize=(10, fig_h))
     ax.axis("off")
-    ax.set_title("48-Hour Load Forecast", fontsize=14, fontweight="bold", pad=12)
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
 
     table = ax.table(cellText=cell_text, colLabels=col_labels,
                      cellColours=cell_colors, loc="center", cellLoc="center")
@@ -591,6 +604,7 @@ def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.show()
     plt.close()
     print(f"[+] Forecast table PNG saved to {save_path}")
 
@@ -630,8 +644,10 @@ def main():
             decoder_week_idx = last_sid + ENCODER_LEN_WEEKS
             hit = week_start_map[week_start_map["week_idx"] == decoder_week_idx]
             dec_start_ts = pd.to_datetime(hit.iloc[0]["week_start_ts"]) if not hit.empty else None
+            device_label = f"XFMR {TARGET_XFMR}"
             print(f"\n[INFO] Printing 48-hour forecast table for last test sample (sample_index={last_sid})")
-            print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT, start_ts=dec_start_ts)
+            print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT, start_ts=dec_start_ts,
+                                 device_name=device_label)
 
             pred_arr = last_pack.get("pred", np.array([]))
             true_arr = last_pack.get("true", np.array([]))
@@ -642,9 +658,13 @@ def main():
                     ts_labels = [t.strftime("%Y-%m-%d %H:%M") for t in ts_range]
                 else:
                     ts_labels = [str(h) for h in range(n_hrs)]
+                title_parts = [device_label, f"{n_hrs}-Hour Load Forecast"]
+                if len(ts_labels) > 0:
+                    title_parts.append(f"{ts_labels[0]} - {ts_labels[-1]}")
+                png_title = " | ".join(title_parts)
                 png_path = os.path.join(out_dir, f"forecast_48h_sample{last_sid}.png")
                 save_forecast_table_png(pred_arr[:n_hrs], true_arr[:n_hrs], ts_labels,
-                                        save_path=png_path)
+                                        save_path=png_path, title=png_title)
         else:
             print(f"[WARN] Could not extract sample {last_sid} for forecast table.")
     else:
