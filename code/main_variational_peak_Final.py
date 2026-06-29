@@ -96,6 +96,55 @@ def make_loader(split_dict, batch_size, shuffle):
     ds = TensorDataset(split_dict['X_enc_l'], split_dict['X_enc_ext'], split_dict['X_dec_in_l'], split_dict['X_dec_in_ext'], split_dict['Y_dec_target'],)
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
+
+def print_forecast_table(mu_seq, sigma_seq=None, target_seq=None, scaler=None, hours=48):
+    """Print a tabular forecast for the next `hours` hours to the console."""
+    n = min(hours, len(mu_seq))
+    mu_np = mu_seq[:n].cpu().numpy().copy()
+
+    has_target = target_seq is not None
+    if has_target:
+        tgt_np = target_seq[:n].cpu().numpy().copy()
+
+    if scaler is not None:
+        mu_np = scaler.inverse_transform(mu_np.reshape(-1, 1)).flatten()
+        if has_target:
+            tgt_np = scaler.inverse_transform(tgt_np.reshape(-1, 1)).flatten()
+
+    has_sigma = sigma_seq is not None
+    if has_sigma:
+        sig_np = sigma_seq[:n].cpu().numpy().copy()
+        if scaler is not None:
+            sig_np = sig_np / scaler.scale_[0]
+
+    width = 90
+    print(f"\n{'=' * width}")
+    print(f"  Forecast: Next {n} Hours (last test sample)")
+    print(f"{'=' * width}")
+    if has_sigma and has_target:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+    elif has_sigma:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+    elif has_target:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}")
+    else:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}")
+    print(f"{'-' * width}")
+
+    for h in range(n):
+        lo = mu_np[h] - 1.96 * sig_np[h] if has_sigma else 0
+        hi = mu_np[h] + 1.96 * sig_np[h] if has_sigma else 0
+        if has_sigma and has_target:
+            print(f"{h:>6d}  {mu_np[h]:>12.4f}  {tgt_np[h]:>12.4f}  {sig_np[h]:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+        elif has_sigma:
+            print(f"{h:>6d}  {mu_np[h]:>12.4f}  {sig_np[h]:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+        elif has_target:
+            print(f"{h:>6d}  {mu_np[h]:>12.4f}  {tgt_np[h]:>12.4f}")
+        else:
+            print(f"{h:>6d}  {mu_np[h]:>12.4f}")
+
+    print(f"{'=' * width}\n")
+
 def process_seq2seq_data(
         feature_dict, *, train_ratio=0.7, norm_features=('load', 'temp'), output_len=24,
         encoder_len_weeks=1, decoder_len_weeks=1, num_in_week=168, device=None):
@@ -296,7 +345,8 @@ def _evaluate_peak_batch(preds_4d, tgts_4d):
 def evaluate_model(model, test_loader, loss_fn, device,
                    model_path="model.pt", reduce="first", visualize=True,
                    quantiles=(0.1, 0.5, 0.9), alpha=0.1,
-                   data_name=None, model_name=None, data_export_list=None):
+                   data_name=None, model_name=None, data_export_list=None,
+                   load_scaler=None, forecast_hours=48):
     
     print(f"--- Evaluating model '{model_name}' on data '{data_name}' ---")
     
@@ -310,7 +360,7 @@ def evaluate_model(model, test_loader, loss_fn, device,
     running_mse = 0.0; running_nll = 0.0; running_crps = 0.0; running_qpin = 0.0; running_wink = 0.0
     peak_sum = {"PVPE_mean": 0.0, "PTE_min_mean": 0.0, "PeakWindowIoU_mean": 0.0,
                 "ThrWindowIoU_mean": 0.0, "PeakPeriodMSE_thr_mean": 0.0,}
-    peak_count = 0; reports = []; running_pve_abs = 0.0; running_pve_pct = 0.0; all_preds = []; all_targets = []
+    peak_count = 0; reports = []; running_pve_abs = 0.0; running_pve_pct = 0.0; all_preds = []; all_targets = []; all_sigmas = []
     
     for batch in test_loader:
         if len(batch) == 5:
@@ -333,7 +383,7 @@ def evaluate_model(model, test_loader, loss_fn, device,
             mu_first = mu_preds[:, :, 0]; logvar_first = logvar_preds[:, :, 0]
             tgt_first = tgt[:, :, 0]; sigma_first = logvar_first.exp().sqrt()
 
-            all_preds.extend(mu_first.cpu()); all_targets.extend(tgt_first.cpu())
+            all_preds.extend(mu_first.cpu()); all_targets.extend(tgt_first.cpu()); all_sigmas.extend(sigma_first.cpu())
             running_mse += loss_fn(mu_first, tgt_first).item() * B
             
             p_true, _ = tgt_first.max(dim=1); p_pred, _ = mu_first.max(dim=1)
@@ -427,6 +477,14 @@ def evaluate_model(model, test_loader, loss_fn, device,
         pmse_thr = peak_sum.get("PeakPeriodMSE_thr_mean", float("nan"))
         print(f"[PEAK] PVPE_mean={peak_sum['PVPE_mean']:.4f}  PTE_min_mean={peak_sum['PTE_min_mean']:.1f} min  IoU(maxwin)={peak_sum['PeakWindowIoU_mean']:.3f}  IoU(thr)={peak_sum['ThrWindowIoU_mean']:.3f}  PMSE_thr={pmse_thr:.6f}")
     print(f"---------------------------------------------------\n")
+
+    if forecast_hours > 0 and len(all_preds) > 0:
+        last_mu = all_preds[-1]
+        last_sigma = all_sigmas[-1] if all_sigmas else None
+        last_target = all_targets[-1] if all_targets else None
+        print_forecast_table(last_mu, sigma_seq=last_sigma, target_seq=last_target,
+                             scaler=load_scaler, hours=forecast_hours)
+
     return test_mse, test_nll, test_crps, test_qpin, test_wink
 
 
@@ -492,12 +550,12 @@ if __name__ == "__main__":
     # === LoRA fine-tuning on new data ===
     times, load, temp, workday, season = get_data_oncor_load_weekly(XFMR="data1") #the dataset you aim to forcast 
     feature_dict = {'load': load, 'temp': temp, 'workday': workday, 'season': season}
-    train_data, test_data, _ = process_seq2seq_data(
+    train_data, test_data, scalers = process_seq2seq_data(
         feature_dict     = feature_dict, train_ratio      = 0.7, output_len       = output_len,
         encoder_len_weeks = encoder_len_weeks, device           = device)
     n_externals = train_data['X_enc_ext'].shape[-1]
     train_loader = make_loader(train_data, batch_size, shuffle=True); test_loader  = make_loader(test_data,  batch_size, shuffle=False)
-    
+
     DATASET_TAG = "ExternalDS"
     plot_data_frames = [] 
 
@@ -555,11 +613,13 @@ if __name__ == "__main__":
     model_hmu_eval.load_state_dict(state_ft, strict=False) 
     
     # Evaluate fine-tuned model (explicitly tagged as "peak" version)
-    evaluate_model(model_hmu_eval, test_loader, nn.MSELoss(), device, 
-                   model_path=lora_model_path_hmu, 
+    evaluate_model(model_hmu_eval, test_loader, nn.MSELoss(), device,
+                   model_path=lora_model_path_hmu,
                    data_name=data_name,
-                   model_name=f"VAE_LORA_peak_r{test}", 
-                   data_export_list=plot_data_frames)
+                   model_name=f"VAE_LORA_peak_r{test}",
+                   data_export_list=plot_data_frames,
+                   load_scaler=scalers.get('load'),
+                   forecast_hours=48)
 
 
     # --- Save Collected Data ---
