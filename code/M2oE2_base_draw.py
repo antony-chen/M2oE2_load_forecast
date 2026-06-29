@@ -487,7 +487,6 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
     """Print a tabular forecast for the next `hours` hours from a denormalized sample pack."""
     pred = pack.get("pred", np.array([]))
     true = pack.get("true", np.array([]))
-    std = pack.get("std", np.array([]))
 
     n = min(hours, len(pred))
     if n == 0:
@@ -495,7 +494,6 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
         return
 
     has_true = len(true) >= n
-    has_std = len(std) >= n
 
     has_ts = start_ts is not None
     if has_ts:
@@ -503,35 +501,37 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
 
     ts_col = "Timestamp" if has_ts else "Hour"
     ts_w = 20 if has_ts else 6
-    width = ts_w + 66
-    print(f"\n{'=' * width}")
-    print(f"  Forecast: Next {n} Hours (denormalized, {load_unit})")
-    print(f"{'=' * width}")
-    if has_std and has_true:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
-    elif has_std:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
-    elif has_true:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}")
+    if has_true:
+        width = ts_w + 56
+        print(f"\n{'=' * width}")
+        print(f"  Forecast: Next {n} Hours ({load_unit})")
+        print(f"{'=' * width}")
+        print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}  {'Actual':>12s}  {'Diff':>12s}  {'Error %':>10s}")
     else:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}")
+        width = ts_w + 16
+        print(f"\n{'=' * width}")
+        print(f"  Forecast: Next {n} Hours ({load_unit})")
+        print(f"{'=' * width}")
+        print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}")
     print(f"{'-' * width}")
 
     for h in range(n):
         ts_str = ts_arr[h].strftime("%Y-%m-%d %H:%M") if has_ts else str(h)
         p = pred[h]
-        if has_std:
-            s = std[h]
-            lo = p - 1.96 * s
-            hi = p + 1.96 * s
-            if has_true:
-                print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {true[h]:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
-            else:
-                print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
-        elif has_true:
-            print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {true[h]:>12.4f}")
+        if has_true:
+            diff = p - true[h]
+            pct = abs(diff) / (abs(true[h]) + 1e-12) * 100.0
+            print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {true[h]:>12.4f}  {diff:>+12.4f}  {pct:>9.2f}%")
         else:
             print(f"{ts_str:>{ts_w}s}  {p:>12.4f}")
+
+    if has_true:
+        pred_n = pred[:n]
+        true_n = true[:n]
+        mae = np.mean(np.abs(pred_n - true_n))
+        mape = np.mean(np.abs(pred_n - true_n) / (np.abs(true_n) + 1e-12)) * 100.0
+        print(f"{'-' * width}")
+        print(f"{'MAE':>{ts_w}s}  {mae:>12.4f}  {'MAPE':>12s}  {'':>12s}  {mape:>9.2f}%")
 
     print(f"{'=' * width}\n")
 

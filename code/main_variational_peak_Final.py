@@ -97,7 +97,7 @@ def make_loader(split_dict, batch_size, shuffle):
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
 
-def print_forecast_table(mu_seq, sigma_seq=None, target_seq=None, scaler=None, hours=48, timestamps=None):
+def print_forecast_table(mu_seq, target_seq=None, scaler=None, hours=48, timestamps=None, **_ignored):
     """Print a tabular forecast for the next `hours` hours to the console."""
     n = min(hours, len(mu_seq))
     mu_np = mu_seq[:n].cpu().numpy().copy()
@@ -111,44 +111,40 @@ def print_forecast_table(mu_seq, sigma_seq=None, target_seq=None, scaler=None, h
         if has_target:
             tgt_np = scaler.inverse_transform(tgt_np.reshape(-1, 1)).flatten()
 
-    has_sigma = sigma_seq is not None
-    if has_sigma:
-        sig_np = sigma_seq[:n].cpu().numpy().copy()
-        if scaler is not None:
-            sig_np = sig_np / scaler.scale_[0]
-
     has_ts = timestamps is not None and len(timestamps) >= n
     if has_ts:
         ts_arr = pd.to_datetime(timestamps[:n])
 
     ts_col = "Timestamp" if has_ts else "Hour"
     ts_w = 20 if has_ts else 6
-    width = ts_w + 66
-    print(f"\n{'=' * width}")
-    print(f"  Forecast: Next {n} Hours (last test sample)")
-    print(f"{'=' * width}")
-    if has_sigma and has_target:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
-    elif has_sigma:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
-    elif has_target:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}")
+    if has_target:
+        width = ts_w + 56
+        print(f"\n{'=' * width}")
+        print(f"  Forecast: Next {n} Hours (last test sample)")
+        print(f"{'=' * width}")
+        print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}  {'Actual':>12s}  {'Diff':>12s}  {'Error %':>10s}")
     else:
-        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}")
+        width = ts_w + 16
+        print(f"\n{'=' * width}")
+        print(f"  Forecast: Next {n} Hours (last test sample)")
+        print(f"{'=' * width}")
+        print(f"{ts_col:>{ts_w}s}  {'Predicted':>12s}")
     print(f"{'-' * width}")
 
     for h in range(n):
         ts_str = ts_arr[h].strftime("%Y-%m-%d %H:%M") if has_ts else str(h)
-        lo = mu_np[h] - 1.96 * sig_np[h] if has_sigma else 0
-        hi = mu_np[h] + 1.96 * sig_np[h] if has_sigma else 0
-        if has_sigma and has_target:
-            print(f"{ts_str:>{ts_w}s}  {mu_np[h]:>12.4f}  {tgt_np[h]:>12.4f}  {sig_np[h]:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
-        elif has_sigma:
-            print(f"{ts_str:>{ts_w}s}  {mu_np[h]:>12.4f}  {sig_np[h]:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
-        elif has_target:
-            print(f"{ts_str:>{ts_w}s}  {mu_np[h]:>12.4f}  {tgt_np[h]:>12.4f}")
+        if has_target:
+            diff = mu_np[h] - tgt_np[h]
+            pct = abs(diff) / (abs(tgt_np[h]) + 1e-12) * 100.0
+            print(f"{ts_str:>{ts_w}s}  {mu_np[h]:>12.4f}  {tgt_np[h]:>12.4f}  {diff:>+12.4f}  {pct:>9.2f}%")
         else:
             print(f"{ts_str:>{ts_w}s}  {mu_np[h]:>12.4f}")
+
+    if has_target:
+        mae = np.mean(np.abs(mu_np - tgt_np))
+        mape = np.mean(np.abs(mu_np - tgt_np) / (np.abs(tgt_np) + 1e-12)) * 100.0
+        print(f"{'-' * width}")
+        print(f"{'MAE':>{ts_w}s}  {mae:>12.4f}  {'MAPE':>12s}  {'':>12s}  {mape:>9.2f}%")
 
     print(f"{'=' * width}\n")
 
@@ -488,9 +484,8 @@ def evaluate_model(model, test_loader, loss_fn, device,
 
     if forecast_hours > 0 and len(all_preds) > 0:
         last_mu = all_preds[-1]
-        last_sigma = all_sigmas[-1] if all_sigmas else None
         last_target = all_targets[-1] if all_targets else None
-        print_forecast_table(last_mu, sigma_seq=last_sigma, target_seq=last_target,
+        print_forecast_table(last_mu, target_seq=last_target,
                              scaler=load_scaler, hours=forecast_hours,
                              timestamps=forecast_timestamps)
 
