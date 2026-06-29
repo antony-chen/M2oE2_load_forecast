@@ -483,7 +483,7 @@ def pick_first_valid_candidate_week(
 # =========================
 # 48-hour forecast table
 # =========================
-def print_forecast_table(pack, hours=48, load_unit="kW"):
+def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None):
     """Print a tabular forecast for the next `hours` hours from a denormalized sample pack."""
     pred = pack.get("pred", np.array([]))
     true = pack.get("true", np.array([]))
@@ -497,34 +497,41 @@ def print_forecast_table(pack, hours=48, load_unit="kW"):
     has_true = len(true) >= n
     has_std = len(std) >= n
 
-    width = 90
+    has_ts = start_ts is not None
+    if has_ts:
+        ts_arr = pd.date_range(start=start_ts, periods=n, freq="h")
+
+    ts_col = "Timestamp" if has_ts else "Hour"
+    ts_w = 20 if has_ts else 6
+    width = ts_w + 66
     print(f"\n{'=' * width}")
     print(f"  Forecast: Next {n} Hours (denormalized, {load_unit})")
     print(f"{'=' * width}")
     if has_std and has_true:
-        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
     elif has_std:
-        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
     elif has_true:
-        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}")
+        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}  {'Actual':>12s}")
     else:
-        print(f"{'Hour':>6s}  {'Pred Load':>12s}")
+        print(f"{ts_col:>{ts_w}s}  {'Pred Load':>12s}")
     print(f"{'-' * width}")
 
     for h in range(n):
+        ts_str = ts_arr[h].strftime("%Y-%m-%d %H:%M") if has_ts else str(h)
         p = pred[h]
         if has_std:
             s = std[h]
             lo = p - 1.96 * s
             hi = p + 1.96 * s
             if has_true:
-                print(f"{h:>6d}  {p:>12.4f}  {true[h]:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+                print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {true[h]:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
             else:
-                print(f"{h:>6d}  {p:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+                print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
         elif has_true:
-            print(f"{h:>6d}  {p:>12.4f}  {true[h]:>12.4f}")
+            print(f"{ts_str:>{ts_w}s}  {p:>12.4f}  {true[h]:>12.4f}")
         else:
-            print(f"{h:>6d}  {p:>12.4f}")
+            print(f"{ts_str:>{ts_w}s}  {p:>12.4f}")
 
     print(f"{'=' * width}\n")
 
@@ -544,7 +551,15 @@ def main():
     if model_base is None:
         raise ValueError("Cannot find base model_name in XLSX. Please adjust BASE_MODEL_KEYS.")
 
-    # --- 48-hour forecast table (last sample) ---
+    # Make unique output dir (never overwrite)
+    out_dir = make_unique_outdir(OUT_DIR_BASE, xlsx_path)
+    xlsx_tag = os.path.splitext(os.path.basename(xlsx_path))[0]
+    print(f"[INFO] Output folder: {out_dir}")
+
+    # Load CSV hourly + week map
+    hourly, week_start_map, temp_col, load_col = load_hourly_df(CSV_PATH, TARGET_XFMR)
+
+    # --- 48-hour forecast table (last sample, with timestamps) ---
     sample_ids = sorted(
         df_xlsx[df_xlsx["model_name"] == model_base]["sample_index"].dropna().unique().tolist()
     )
@@ -553,20 +568,15 @@ def main():
         last_pack = extract_one_sample(df_xlsx, last_sid, model_base)
         if last_pack is not None:
             last_pack = denorm_pack_load(last_pack, meta)
+            decoder_week_idx = last_sid + ENCODER_LEN_WEEKS
+            hit = week_start_map[week_start_map["week_idx"] == decoder_week_idx]
+            dec_start_ts = pd.to_datetime(hit.iloc[0]["week_start_ts"]) if not hit.empty else None
             print(f"\n[INFO] Printing 48-hour forecast table for last test sample (sample_index={last_sid})")
-            print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT)
+            print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT, start_ts=dec_start_ts)
         else:
             print(f"[WARN] Could not extract sample {last_sid} for forecast table.")
     else:
         print("[WARN] No samples found in XLSX for forecast table.")
-
-    # Make unique output dir (never overwrite)
-    out_dir = make_unique_outdir(OUT_DIR_BASE, xlsx_path)
-    xlsx_tag = os.path.splitext(os.path.basename(xlsx_path))[0]
-    print(f"[INFO] Output folder: {out_dir}")
-
-    # Load CSV hourly + week map
-    hourly, week_start_map, temp_col, load_col = load_hourly_df(CSV_PATH, TARGET_XFMR)
 
     summary = {
         "xfmr": int(TARGET_XFMR),
