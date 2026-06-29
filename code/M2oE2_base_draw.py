@@ -42,7 +42,7 @@ XLSX_PATH = "vae_base_only_v5_XFMR125916888.xlsx"
 # e.g. "vae_base_scaler_meta_v5_v1temp_oracle.json"
 SCALER_META_JSON = "vae_base_scaler_meta_v5.json"
 
-TARGET_XFMR = data1
+TARGET_XFMR = "data1"
 ENCODER_LEN_WEEKS = 1
 
 BASE_MODEL_KEYS = ["VAE_BASE_V5", "BASE_V5", "BASE"]
@@ -481,6 +481,55 @@ def pick_first_valid_candidate_week(
 
 
 # =========================
+# 48-hour forecast table
+# =========================
+def print_forecast_table(pack, hours=48, load_unit="kW"):
+    """Print a tabular forecast for the next `hours` hours from a denormalized sample pack."""
+    pred = pack.get("pred", np.array([]))
+    true = pack.get("true", np.array([]))
+    std = pack.get("std", np.array([]))
+
+    n = min(hours, len(pred))
+    if n == 0:
+        print("[WARN] No predictions available for forecast table.")
+        return
+
+    has_true = len(true) >= n
+    has_std = len(std) >= n
+
+    width = 90
+    print(f"\n{'=' * width}")
+    print(f"  Forecast: Next {n} Hours (denormalized, {load_unit})")
+    print(f"{'=' * width}")
+    if has_std and has_true:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+    elif has_std:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Std':>10s}  {'95% CI Low':>12s}  {'95% CI High':>12s}")
+    elif has_true:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}  {'Actual':>12s}")
+    else:
+        print(f"{'Hour':>6s}  {'Pred Load':>12s}")
+    print(f"{'-' * width}")
+
+    for h in range(n):
+        p = pred[h]
+        if has_std:
+            s = std[h]
+            lo = p - 1.96 * s
+            hi = p + 1.96 * s
+            if has_true:
+                print(f"{h:>6d}  {p:>12.4f}  {true[h]:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+            else:
+                print(f"{h:>6d}  {p:>12.4f}  {s:>10.4f}  {lo:>12.4f}  {hi:>12.4f}")
+        elif has_true:
+            print(f"{h:>6d}  {p:>12.4f}  {true[h]:>12.4f}")
+        else:
+            print(f"{h:>6d}  {p:>12.4f}")
+
+    print(f"{'=' * width}\n")
+
+
+# =========================
 # Main
 # =========================
 def main():
@@ -494,6 +543,22 @@ def main():
     print(f"[INFO] model_base picked: {model_base}")
     if model_base is None:
         raise ValueError("Cannot find base model_name in XLSX. Please adjust BASE_MODEL_KEYS.")
+
+    # --- 48-hour forecast table (last sample) ---
+    sample_ids = sorted(
+        df_xlsx[df_xlsx["model_name"] == model_base]["sample_index"].dropna().unique().tolist()
+    )
+    if sample_ids:
+        last_sid = int(sample_ids[-1])
+        last_pack = extract_one_sample(df_xlsx, last_sid, model_base)
+        if last_pack is not None:
+            last_pack = denorm_pack_load(last_pack, meta)
+            print(f"\n[INFO] Printing 48-hour forecast table for last test sample (sample_index={last_sid})")
+            print_forecast_table(last_pack, hours=48, load_unit=LOAD_UNIT)
+        else:
+            print(f"[WARN] Could not extract sample {last_sid} for forecast table.")
+    else:
+        print("[WARN] No samples found in XLSX for forecast table.")
 
     # Make unique output dir (never overwrite)
     out_dir = make_unique_outdir(OUT_DIR_BASE, xlsx_path)
