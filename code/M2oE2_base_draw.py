@@ -539,8 +539,17 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None,
         true_n = true[:n]
         mae = np.mean(np.abs(pred_n - true_n))
         mape = np.mean(np.abs(pred_n - true_n) / (np.abs(true_n) + 1e-12)) * 100.0
+        peak_pred = np.max(pred_n)
+        peak_actual = np.max(true_n)
+        peak_diff = peak_pred - peak_actual
+        peak_pct = abs(peak_diff) / (abs(peak_actual) + 1e-12) * 100.0
         print(f"{'-' * width}")
         print(f"{'MAE':>{ts_w}s}  {mae:>12.4f}  {'MAPE':>12s}  {'':>12s}  {mape:>9.2f}%")
+        print(f"{'Peak':>{ts_w}s}  {peak_pred:>12.4f}  {peak_actual:>12.4f}  "
+              f"\033[1;33m{peak_diff:>+12.4f}  {peak_pct:>9.2f}%\033[0m")
+    else:
+        print(f"{'-' * width}")
+        print(f"{'Peak':>{ts_w}s}  {np.max(pred[:n]):>12.4f}")
 
     print(f"{'=' * width}\n")
 
@@ -572,10 +581,18 @@ def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h
     cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
     cell_colors.append(["#D9E2F3"] * 5)
 
+    peak_pred = np.max(pred_np)
+    peak_actual = np.max(true_np)
+    peak_diff = peak_pred - peak_actual
+    peak_pct = abs(peak_diff) / (abs(peak_actual) + 1e-12) * 100.0
+    cell_text.append(["Peak", f"{peak_pred:.2f}", f"{peak_actual:.2f}",
+                      f"{peak_diff:+.2f}", f"{peak_pct:.1f}%"])
+    cell_colors.append(["#FFF2CC", "#FFF2CC", "#FFF2CC", "#FFD966", "#FFD966"])
+
     if title is None:
         title = f"{n}-Hour Load Forecast"
 
-    fig_h = max(4, 0.32 * (n + 2))
+    fig_h = max(4, 0.32 * (n + 3))
     fig, ax = plt.subplots(figsize=(10, fig_h))
     ax.axis("off")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
@@ -601,6 +618,10 @@ def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h
     summary_row = n + 1
     for j in range(len(col_labels)):
         table[summary_row, j].set_text_props(fontweight="bold")
+
+    peak_row = n + 2
+    for j in range(len(col_labels)):
+        table[peak_row, j].set_text_props(fontweight="bold")
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
