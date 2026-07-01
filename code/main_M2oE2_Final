@@ -570,6 +570,8 @@ def train_model_v2(
             "amp": 0.0, "topk": 0.0, "kl": 0.0, "cont": 0.0,
         }
         cnt_parts = 0
+        sum_mu_mean = 0.0; sum_mu_std = 0.0
+        sum_lv_mean = 0.0; sum_lv_std = 0.0
 
         w_peak = 1.0 if (peak_warmup_epochs is None or peak_warmup_epochs <= 0) else min(1.0, ep / float(peak_warmup_epochs))
         lam_thr_ep = lam_thr * w_peak
@@ -593,6 +595,12 @@ def train_model_v2(
                 enc_l, enc_ext, dec_l, dec_ext,
                 epoch=ep, top_k=top_k, warmup_epochs=warmup_epochs
             )
+
+            with torch.no_grad():
+                sum_mu_mean += mu_z.mean().item()
+                sum_mu_std  += mu_z.std().item()
+                sum_lv_mean += logvar_z.mean().item()
+                sum_lv_std  += logvar_z.std().item()
 
             loss_main, parts = v7_peak_fidelity_loss(
                 mu_preds, logvar_preds, tgt,
@@ -691,6 +699,11 @@ def train_model_v2(
                     f"+{lam_topk_ep * avg_topk:.4f} +{kl_weight * avg_kl:.4f} "
                     f"+{continuity_weight * avg_cont:.4f}"
                 )
+            n_batches = max(1, cnt_parts)
+            print(
+                f"[DIAG]  mu: mean={sum_mu_mean/n_batches:.3f}  std={sum_mu_std/n_batches:.3f} | "
+                f"logvar: mean={sum_lv_mean/n_batches:.3f}  std={sum_lv_std/n_batches:.3f}"
+            )
 
     print(f"\n🏁 [BASE v2] Done. Best epoch {best_epoch} | loss {best_train:.6f}")
     return model
