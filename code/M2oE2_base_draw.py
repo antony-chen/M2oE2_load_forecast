@@ -554,59 +554,44 @@ def print_forecast_table(pack, hours=48, load_unit="kW", start_ts=None,
     print(f"{'=' * width}\n")
 
 
-def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h.png",
-                            title=None):
-    """Render the forecast table as a color-coded PNG."""
-    import matplotlib.colors as mcolors
-
-    n = len(pred_np)
-    diff = pred_np - true_np
-    pct_err = np.abs(diff) / (np.abs(true_np) + 1e-12) * 100.0
+def _build_table_panel(ax, pred, true, ts_labels, subtitle, cmap, norm):
+    """Render one 24-hour block as a colour-coded table on the given Axes."""
+    n = len(pred)
+    diff = pred - true
+    pct_err = np.abs(diff) / (np.abs(true) + 1e-12) * 100.0
     mae = np.mean(np.abs(diff))
     mape = np.mean(pct_err)
-
-    cmap = plt.cm.RdYlGn_r
-    norm = mcolors.Normalize(vmin=0, vmax=30)
+    peak_pred = np.max(pred)
+    peak_actual = np.max(true)
+    peak_diff = peak_pred - peak_actual
+    peak_pct = abs(peak_diff) / (abs(peak_actual) + 1e-12) * 100.0
 
     col_labels = ["Timestamp", "Predicted", "Actual", "Diff", "Error %"]
-    cell_text = []
-    cell_colors = []
+    cell_text, cell_colors = [], []
     for h in range(n):
-        row = [ts_labels[h], f"{pred_np[h]:.2f}", f"{true_np[h]:.2f}",
-               f"{diff[h]:+.2f}", f"{pct_err[h]:.1f}%"]
-        cell_text.append(row)
+        cell_text.append([ts_labels[h], f"{pred[h]:.2f}", f"{true[h]:.2f}",
+                          f"{diff[h]:+.2f}", f"{pct_err[h]:.1f}%"])
         c = cmap(norm(min(pct_err[h], 30)))
         cell_colors.append(["white", "white", "white", c, c])
 
     cell_text.append(["", f"MAE: {mae:.2f}", "", "", f"MAPE: {mape:.1f}%"])
     cell_colors.append(["#D9E2F3"] * 5)
-
-    peak_pred = np.max(pred_np)
-    peak_actual = np.max(true_np)
-    peak_diff = peak_pred - peak_actual
-    peak_pct = abs(peak_diff) / (abs(peak_actual) + 1e-12) * 100.0
     cell_text.append(["Peak", f"{peak_pred:.2f}", f"{peak_actual:.2f}",
                       f"{peak_diff:+.2f}", f"{peak_pct:.1f}%"])
     cell_colors.append(["#FFF2CC", "#FFF2CC", "#FFF2CC", "#FFD966", "#FFD966"])
 
-    if title is None:
-        title = f"{n}-Hour Load Forecast"
-
-    fig_h = max(4, 0.32 * (n + 3))
-    fig, ax = plt.subplots(figsize=(10, fig_h))
     ax.axis("off")
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+    ax.set_title(subtitle, fontsize=9, fontweight="bold", pad=6)
 
     table = ax.table(cellText=cell_text, colLabels=col_labels,
                      cellColours=cell_colors, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1, 1.2)
+    table.set_fontsize(7)
+    table.scale(1, 1.15)
 
     for j in range(len(col_labels)):
-        cell = table[0, j]
-        cell.set_facecolor("#4472C4")
-        cell.set_text_props(color="white", fontweight="bold")
+        table[0, j].set_facecolor("#4472C4")
+        table[0, j].set_text_props(color="white", fontweight="bold")
 
     for h in range(n):
         c = cmap(norm(min(pct_err[h], 30)))
@@ -615,14 +600,41 @@ def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h
         table[h + 1, 3].set_text_props(color=txt_color)
         table[h + 1, 4].set_text_props(color=txt_color)
 
-    summary_row = n + 1
     for j in range(len(col_labels)):
-        table[summary_row, j].set_text_props(fontweight="bold")
+        table[n + 1, j].set_text_props(fontweight="bold")
+        table[n + 2, j].set_text_props(fontweight="bold")
 
-    peak_row = n + 2
-    for j in range(len(col_labels)):
-        table[peak_row, j].set_text_props(fontweight="bold")
 
+def save_forecast_table_png(pred_np, true_np, ts_labels, save_path="forecast_48h.png",
+                            title=None):
+    """Render the 48-hour forecast as two 24-hour tables side by side (PowerPoint 16:9)."""
+    import matplotlib.colors as mcolors
+
+    if title is None:
+        title = f"{len(pred_np)}-Hour Load Forecast"
+
+    cmap = plt.cm.RdYlGn_r
+    norm = mcolors.Normalize(vmin=0, vmax=30)
+
+    mid = min(24, len(pred_np))
+    h1_pred, h2_pred = pred_np[:mid], pred_np[mid:]
+    h1_true, h2_true = true_np[:mid], true_np[mid:]
+    h1_labels        = ts_labels[:mid]
+    h2_labels        = ts_labels[mid:]
+
+    sub1 = f"{h1_labels[0]} – {h1_labels[-1]}" if h1_labels else "Hours 1–24"
+    sub2 = f"{h2_labels[0]} – {h2_labels[-1]}" if h2_labels else "Hours 25–48"
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.33, 7.5))
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.99)
+
+    _build_table_panel(ax1, h1_pred, h1_true, h1_labels, sub1, cmap, norm)
+    if len(h2_pred) > 0:
+        _build_table_panel(ax2, h2_pred, h2_true, h2_labels, sub2, cmap, norm)
+    else:
+        ax2.axis("off")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.show()
