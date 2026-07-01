@@ -1,6 +1,8 @@
+import math
 import torch
 import torch.nn as nn
-import math
+import torch.nn.functional as F
+from torch.optim import AdamW
 
 
 # ============================================================
@@ -600,3 +602,112 @@ class VariationalSeq2Seq_meta(nn.Module):
             enc_l_last=enc_l_last,
         )
         return mu_preds, logvar_preds, mu, logvar
+
+
+# ============================================================
+# Loss Functions
+# ============================================================
+
+_LOG_2PI = math.log(2 * math.pi)
+
+
+def gaussian_nll_loss(mu, logvar, target, reduction="mean"):
+    """Gaussian NLL with optional per-element output for weighted losses."""
+    logvar = torch.clamp(logvar, min=-10, max=10)
+    nll = 0.5 * (logvar + _LOG_2PI + (target - mu) ** 2 / logvar.exp())
+    if reduction == "mean":
+        return nll.mean()
+    if reduction == "sum":
+        return nll.sum()
+    if reduction == "none":
+        return nll
+    raise ValueError(f"Unknown reduction: {reduction}")
+
+
+def kl_loss(mu_z, logvar_z):
+    return -0.5 * torch.mean(1 + logvar_z - mu_z.pow(2) - logvar_z.exp())
+
+
+# ============================================================
+# Training
+# ============================================================
+
+def train_model(
+    model,
+    train_loader,
+    epochs,
+    lr,
+    device,
+    top_k=2,
+    kl_weight=0.01,
+    warmup_epochs=10,
+    save_path="best_model.pt",
+    optimizer=None,
+    peak_loss_weight: float = 10.0,
+    peak_threshold_q: float = 0.90,
+    continuity_weight: float = 1.0,
+):
+    """
+    Training loop with peak-weighted NLL, KL divergence, and a boundary
+    continuity term that pulls the first decoder prediction toward the last
+    encoder load value.
+    """
+    if optimizer is None:
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    best_loss = float("inf")
+    best_epoch = -1
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        running = 0.0
+
+        for enc_l, enc_ext, dec_l, dec_ext, tgt in train_loader:
+            enc_l  = enc_l.to(device)
+            enc_ext = enc_ext.to(device)
+            dec_l  = dec_l.to(device)
+            dec_ext = dec_ext.to(device)
+            tgt    = tgt.to(device)
+
+            optimizer.zero_grad()
+
+            mu_preds, logvar_preds, mu_z, logvar_z = model(
+                enc_l, enc_ext, dec_l, dec_ext,
+                epoch=ep, top_k=top_k, warmup_epochs=warmup_epochs,
+            )
+
+            # Peak-weighted NLL
+            nll_pointwise = gaussian_nll_loss(mu_preds, logvar_preds, tgt, reduction="none")
+            with torch.no_grad():
+                peak_thresh = torch.quantile(tgt, peak_threshold_q)
+                is_peak = tgt >= peak_thresh
+            weights = torch.ones_like(tgt)
+            weights[is_peak] = peak_loss_weight
+            nll_weighted = (nll_pointwise * weights).mean()
+
+            # KL divergence
+            kl = kl_loss(mu_z, logvar_z)
+
+            # Boundary continuity: step-0 first-horizon prediction vs last encoder load
+            enc_last  = enc_l[:, -1, 0]       # [B] — normalised
+            dec_first = mu_preds[:, 0, 0, 0]  # [B]
+            cont_loss = F.mse_loss(dec_first, enc_last)
+
+            loss = nll_weighted + kl_weight * kl + continuity_weight * cont_loss
+
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * enc_l.size(0)
+
+        avg = running / len(train_loader.dataset)
+        if avg < best_loss:
+            best_loss = avg
+            best_epoch = ep
+            torch.save(model.state_dict(), save_path)
+            print(f"✅ Saved best model at epoch {ep} | loss {best_loss:.6f}")
+
+        if ep == 1 or ep % 5 == 0 or ep == epochs:
+            print(f"Epoch {ep:3d}/{epochs} | train loss: {avg:.6f} | best: {best_loss:.6f} (ep {best_epoch})")
+
+    print(f"\n🏁 Done. Best epoch {best_epoch} | loss {best_loss:.6f}")
+    return model
