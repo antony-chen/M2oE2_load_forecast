@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, Subset
 from sklearn.preprocessing import MinMaxScaler
 from data_utils import *
-from model_v1 import *
+from model_v2 import *
 import numpy as np, random, torch, torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
@@ -323,13 +323,15 @@ def gaussian_nll_loss(mu, logvar, target, reduction='mean'):
 # Training Engine
 # ---------------------------------------------------------------------------
 
-def train_model(model, train_loader, epochs, lr, device, 
-                top_k=2, kl_weight=0.01, warmup_epochs=10, 
+def train_model(model, train_loader, epochs, lr, device,
+                top_k=2, kl_weight=0.01, warmup_epochs=10,
                 save_path="best_model.pt", optimizer=None,
                 # --- Peak Weighting Parameters ---
                 peak_loss_weight: float = 10.0,
-                peak_threshold_q: float = 0.90
-                # ---------------------------------
+                peak_threshold_q: float = 0.90,
+                # --- Boundary Continuity Parameters ---
+                continuity_weight: float = 1.0,
+                # --------------------------------------
                ):
     """
     Model training loop with Peak-Weighted Loss.
@@ -384,10 +386,16 @@ def train_model(model, train_loader, epochs, lr, device,
             
             # 5. Compute KL divergence loss
             kl = kl_loss(mu_z, logvar_z)
-            
-            # 6. Aggregate final loss
-            loss = nll_weighted + kl_weight * kl
-            
+
+            # 6. Continuity loss: penalise step-0 prediction deviating from
+            #    the last encoder load value (normalised space, same as targets).
+            enc_last = enc_l[:, -1, 0]                 # [B]
+            dec_first = mu_preds[:, 0, 0, 0]           # [B] step-0, horizon-0
+            continuity_loss = nn.functional.mse_loss(dec_first, enc_last)
+
+            # 7. Aggregate final loss
+            loss = nll_weighted + kl_weight * kl + continuity_weight * continuity_loss
+
             # --- End of Loss Logic ---
 
             loss.backward()

@@ -466,12 +466,15 @@ class VariationalDecoder_meta_predvar(nn.Module):
         self.head_logvar = nn.Linear(latent_size, output_len * output_dim)
 
     def forward(self, x_ext_seq, z_latent, transform_block,
-                epoch=None, top_k=None, warmup_epochs=0):
+                epoch=None, top_k=None, warmup_epochs=0, enc_l_last=None):
         """
         Autoregressive decoder: does not use current-week load as input.
         Uses its own mean predictions as the load signal for the MetaTransformBlock.
 
-        x_ext_seq: [B, L, K_ext]
+        x_ext_seq:   [B, L, K_ext]
+        enc_l_last:  [B, 1] last encoder load value; used to warm-start the AR
+                     seed so the decoder begins conditioned on a known boundary
+                     rather than its own cold step-0 prediction.
         """
         B = z_latent.shape[0]
         L = x_ext_seq.shape[1]
@@ -480,13 +483,20 @@ class VariationalDecoder_meta_predvar(nn.Module):
         mu_preds = []
         logvar_preds = []
 
+        # Step 0: predict purely from the latent state.
         h_last = h_rnn[-1]
         mu_0 = self.head_mu(h_last).view(B, self.output_len, self.output_dim)
         logvar_0 = self.head_logvar(h_last).view(B, self.output_len, self.output_dim)
         mu_preds.append(mu_0.unsqueeze(1))
         logvar_preds.append(logvar_0.unsqueeze(1))
 
-        ar_load = mu_0[:, 0, :]  # [B, output_dim]
+        # Warm-start: seed the AR loop with the real last encoder value when
+        # available, so steps 1..L begin from a known boundary rather than
+        # the model's own cold step-0 guess.
+        if enc_l_last is not None:
+            ar_load = enc_l_last  # [B, output_dim]
+        else:
+            ar_load = mu_0[:, 0, :]  # [B, output_dim]
 
         for t in range(L):
             h_for_meta = h_rnn[-1]
@@ -581,10 +591,12 @@ class VariationalSeq2Seq_meta(nn.Module):
             epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs
         )
         z = self.reparameterize(mu, logvar)
+        enc_l_last = enc_l[:, -1, :]  # [B, 1] — boundary seed for decoder AR loop
         mu_preds, logvar_preds = self.decoder(
             dec_ext,
             z_latent=z,
             transform_block=self.transform_dec,
-            epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs
+            epoch=epoch, top_k=top_k, warmup_epochs=warmup_epochs,
+            enc_l_last=enc_l_last,
         )
         return mu_preds, logvar_preds, mu, logvar
