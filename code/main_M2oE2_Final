@@ -549,6 +549,7 @@ def train_model_v2(
     start_epoch: int = 1,
     best_train_init: float = float("inf"),
     best_epoch_init: int = -1,
+    continuity_weight: float = 1.0,
 ):
     if optimizer is None:
         optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -566,7 +567,7 @@ def train_model_v2(
         skipped = 0
         sum_parts = {
             "nll": 0.0, "thr": 0.0, "q": 0.0, "time": 0.0,
-            "amp": 0.0, "topk": 0.0, "kl": 0.0
+            "amp": 0.0, "topk": 0.0, "kl": 0.0, "cont": 0.0,
         }
         cnt_parts = 0
 
@@ -620,7 +621,13 @@ def train_model_v2(
             else:
                 kl = torch.zeros((), device=device)
 
-            loss = loss_main + kl_weight * kl
+            # Boundary continuity: penalise step-0 first-horizon prediction
+            # deviating from the last encoder load value (normalised space).
+            enc_last  = enc_l[:, -1, 0]       # [B]
+            dec_first = mu_preds[:, 0, 0, 0]  # [B]
+            cont_loss = nn.functional.mse_loss(dec_first, enc_last)
+
+            loss = loss_main + kl_weight * kl + continuity_weight * cont_loss
             if not torch.isfinite(loss):
                 skipped += 1
                 continue
@@ -632,6 +639,7 @@ def train_model_v2(
             sum_parts["amp"] += parts["amp"]
             sum_parts["topk"] += parts["topk"]
             sum_parts["kl"] += float(kl.detach().cpu())
+            sum_parts["cont"] += float(cont_loss.detach().cpu())
             cnt_parts += 1
 
             loss.backward()
@@ -673,12 +681,15 @@ def train_model_v2(
                 avg_amp = sum_parts["amp"] / cnt_parts
                 avg_topk = sum_parts["topk"] / cnt_parts
                 avg_kl = sum_parts["kl"] / cnt_parts
+                avg_cont = sum_parts["cont"] / cnt_parts
                 print(
                     f"[PARTS] nll={avg_nll:.4f} thr={avg_thr:.4f} q={avg_q:.4f} "
-                    f"time={avg_time:.4f} amp={avg_amp:.4f} topk={avg_topk:.4f} kl={avg_kl:.4f} | weighted: "
+                    f"time={avg_time:.4f} amp={avg_amp:.4f} topk={avg_topk:.4f} "
+                    f"kl={avg_kl:.4f} cont={avg_cont:.4f} | weighted: "
                     f"+{lam_thr_ep * avg_thr:.4f} +{lam_q_ep * avg_q:.4f} "
                     f"+{lam_time_ep * avg_time:.4f} +{lam_amp_ep * avg_amp:.4f} "
-                    f"+{lam_topk_ep * avg_topk:.4f} +{kl_weight * avg_kl:.4f}"
+                    f"+{lam_topk_ep * avg_topk:.4f} +{kl_weight * avg_kl:.4f} "
+                    f"+{continuity_weight * avg_cont:.4f}"
                 )
 
     print(f"\n🏁 [BASE v2] Done. Best epoch {best_epoch} | loss {best_train:.6f}")
